@@ -20,6 +20,10 @@ let hfGenerator = null; // Hugging Face text generation pipeline instance
 let hfModelLoading = false;
 
 // Settings (Loaded from LocalStorage or Defaults)
+if (localStorage.getItem('martha_ai_provider') === 'huggingface') {
+    localStorage.setItem('martha_ai_provider', 'local');
+}
+
 const settings = {
     apiKey: localStorage.getItem('martha_api_key') || '',
     wakeWordEnabled: localStorage.getItem('martha_wake_word_enabled') !== 'false',
@@ -27,7 +31,7 @@ const settings = {
     speechRate: parseFloat(localStorage.getItem('martha_speech_rate') || '1.0'),
     soundEffectsEnabled: localStorage.getItem('martha_sound_effects') !== 'false',
     autoSpeakEnabled: localStorage.getItem('martha_auto_speak') !== 'false',
-    aiProvider: localStorage.getItem('martha_ai_provider') || 'huggingface',
+    aiProvider: localStorage.getItem('martha_ai_provider') || 'local',
     ollamaModel: localStorage.getItem('martha_ollama_model') || 'llama3.2',
     ollamaUrl: localStorage.getItem('martha_ollama_url') || 'http://localhost:11434'
 };
@@ -48,6 +52,7 @@ const closeSettingsBtn = document.getElementById('close-settings-btn');
 const settingsDrawer = document.getElementById('settings-drawer');
 const saveSettingsBtn = document.getElementById('save-settings-btn');
 const micTriggerBtn = document.getElementById('mic-trigger-btn');
+const stopSpeakingBtn = document.getElementById('stop-speaking-btn');
 const muteVoiceBtn = document.getElementById('mute-voice-btn');
 const clearChatBtn = document.getElementById('clear-chat-btn');
 const sendQueryBtn = document.getElementById('send-query-btn');
@@ -72,10 +77,8 @@ const modelProgressDiv = document.getElementById('model-progress');
 const modelProgressText = document.getElementById('model-progress-text');
 const modelProgressBar = document.getElementById('model-progress-bar');
 
-// Toast & Chime
+// Toast
 const toast = document.getElementById('toast');
-const chimeStart = document.getElementById('chime-start');
-const chimeSuccess = document.getElementById('chime-success');
 
 /* ==========================================================================
    INITIALIZATION
@@ -258,54 +261,144 @@ function initSpeechSynthesis() {
 }
 
 function speakText(text) {
-    if (!('speechSynthesis' in window) || !settings.autoSpeakEnabled) {
+    if (!settings.autoSpeakEnabled) {
         setAgentState('sleeping');
         return;
     }
 
-    window.speechSynthesis.cancel();
     const cleanText = text.replace(/[\*\#\_]/g, '').trim();
-    setAgentState('speaking');
-    
-    currentUtterance = new SpeechSynthesisUtterance(cleanText);
-    currentUtterance.rate = settings.speechRate;
-
-    if (settings.voiceName) {
-        const voice = synthVoices.find(v => v.name === settings.voiceName);
-        if (voice) currentUtterance.voice = voice;
-    } else {
-        const englishVoice = synthVoices.find(v => v.lang.startsWith('en') && (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Google')));
-        if (englishVoice) currentUtterance.voice = englishVoice;
+    if (!cleanText) {
+        setAgentState('sleeping');
+        return;
     }
 
-    const resumeSynthInterval = setInterval(() => {
-        if (appState === 'speaking') {
-            window.speechSynthesis.pause();
-            window.speechSynthesis.resume();
-        } else {
-            clearInterval(resumeSynthInterval);
+    // Primary Local TTS: Web Speech API (Local System Voices)
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        setAgentState('speaking');
+        
+        currentUtterance = new SpeechSynthesisUtterance(cleanText);
+        currentUtterance.rate = settings.speechRate;
+
+        if (settings.voiceName) {
+            const voice = synthVoices.find(v => v.name === settings.voiceName);
+            if (voice) currentUtterance.voice = voice;
+        } else if (synthVoices.length > 0) {
+            const englishVoice = synthVoices.find(v => v.lang.startsWith('en') && (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex')));
+            if (englishVoice) currentUtterance.voice = englishVoice;
         }
-    }, 10000);
 
-    currentUtterance.onend = () => {
-        clearInterval(resumeSynthInterval);
-        playChime(chimeSuccess);
-        setAgentState('sleeping');
-    };
+        const resumeSynthInterval = setInterval(() => {
+            if (appState === 'speaking') {
+                window.speechSynthesis.pause();
+                window.speechSynthesis.resume();
+            } else {
+                clearInterval(resumeSynthInterval);
+            }
+        }, 10000);
 
-    currentUtterance.onerror = (e) => {
-        clearInterval(resumeSynthInterval);
-        console.error('Speech synthesis error:', e);
-        setAgentState('sleeping');
-    };
+        currentUtterance.onend = () => {
+            clearInterval(resumeSynthInterval);
+            playSuccessChime();
+            setAgentState('sleeping');
+        };
 
-    window.speechSynthesis.speak(currentUtterance);
+        currentUtterance.onerror = (e) => {
+            clearInterval(resumeSynthInterval);
+            console.warn('Browser SpeechSynthesis error, falling back to local Python TTS:', e);
+            fallbackLocalBackendTTS(cleanText);
+        };
+
+        window.speechSynthesis.speak(currentUtterance);
+    } else {
+        // Fallback Local TTS: Native Python Backend OS Speech Synthesis
+        fallbackLocalBackendTTS(cleanText);
+    }
 }
 
-function playChime(chimeElement) {
-    if (settings.soundEffectsEnabled && chimeElement) {
-        chimeElement.currentTime = 0;
-        chimeElement.play().catch(e => console.log('Chime blocked by browser autoplay policy'));
+function fallbackLocalBackendTTS(text) {
+    setAgentState('speaking');
+    fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+    }).then(() => {
+        playSuccessChime();
+        setAgentState('sleeping');
+    }).catch(err => {
+        console.error('Local backend TTS error:', err);
+        setAgentState('sleeping');
+    });
+}
+
+/* Web Audio API Synthesized Sound Chimes (100% Local, Zero File Dependencies) */
+let audioCtx = null;
+
+function getAudioContext() {
+    if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+            audioCtx = new AudioContextClass();
+        }
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+    return audioCtx;
+}
+
+function playStartChime() {
+    if (!settings.soundEffectsEnabled) return;
+    try {
+        const ctx = getAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.25);
+    } catch (e) {
+        console.log('Start chime error:', e);
+    }
+}
+
+function playSuccessChime() {
+    if (!settings.soundEffectsEnabled) return;
+    try {
+        const ctx = getAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const freqs = [523.25, 659.25, 783.99]; // C5, E5, G5 major triad
+        freqs.forEach((freq, idx) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            const startTime = now + (idx * 0.07);
+
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, startTime);
+
+            gain.gain.setValueAtTime(0.12, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.25);
+
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+
+            osc.start(startTime);
+            osc.stop(startTime + 0.25);
+        });
+    } catch (e) {
+        console.log('Success chime error:', e);
     }
 }
 
@@ -335,7 +428,7 @@ function initSpeechRecognition() {
         console.log('Speech recognition ended');
         isRecognitionActive = false;
         updateMicButtonUI();
-        if (settings.wakeWordEnabled && appState === 'sleeping') {
+        if (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking')) {
             startRecognition();
         }
     };
@@ -350,8 +443,6 @@ function initSpeechRecognition() {
     };
 
     recognition.onresult = (event) => {
-        if (appState !== 'sleeping' && appState !== 'listening') return;
-
         let interimTranscript = '';
         let finalTranscript = '';
 
@@ -367,23 +458,41 @@ function initSpeechRecognition() {
         const currentText = (finalTranscript || interimTranscript).trim();
         if (!currentText) return;
 
-        liveTranscript.innerHTML = `"${currentText}"`;
+        const lowerText = currentText.toLowerCase();
+
+        // Immediate Voice Interruption handling while speaking or listening
+        if (/\b(stop|shut up|quiet|hush|pause|silence|abort|enough|martha stop)\b/.test(lowerText)) {
+            stopEverything();
+            liveTranscript.innerHTML = '"Stopped"';
+            showToast("Assistant Stopped");
+            return;
+        }
+
+        // While Martha is speaking, ignore non-stop audio to prevent self-echoing
+        if (appState === 'speaking') {
+            return;
+        }
 
         if (appState === 'sleeping') {
-            const wakeMatch = currentText.toLowerCase().match(/\b(martha|hey martha|hay martha)\b/);
+            const wakeMatch = lowerText.match(/\b(martha|hey martha|hay martha)\b/);
             if (wakeMatch) {
                 const matchIndex = wakeMatch.index;
                 const matchWord = wakeMatch[0];
                 const commandPart = currentText.substring(matchIndex + matchWord.length).trim();
-                liveTranscript.innerHTML = "";
                 triggerActivation(commandPart);
             }
         } else if (appState === 'listening') {
+            liveTranscript.innerHTML = `"${currentText}"`;
+            const textToProcess = (finalTranscript || interimTranscript).trim();
+            const cleanedText = textToProcess.replace(/\b(martha|hey martha|hay martha)\b/gi, '').trim();
+
+            if (!cleanedText) return;
+
             if (finalTranscript.trim().length > 0) {
                 if (silenceTimer) clearTimeout(silenceTimer);
-                handleCommand(finalTranscript.trim());
+                handleCommand(cleanedText);
             } else {
-                resetSilenceTimer(interimTranscript.trim());
+                resetSilenceTimer(cleanedText);
             }
         }
     };
@@ -391,6 +500,15 @@ function initSpeechRecognition() {
     if (settings.wakeWordEnabled) {
         startRecognition();
     }
+}
+
+function stopEverything() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+    }
+    fetch('/api/tts?action=stop').catch(() => {});
+    setAgentState('sleeping');
 }
 
 function enableTextOnlyFallback() {
@@ -430,15 +548,26 @@ function stopRecognition() {
 }
 
 function triggerActivation(oneShotCommand = "") {
-    playChime(chimeStart);
+    playStartChime();
     setAgentState('listening');
     
-    if (oneShotCommand.length > 2) {
-        liveTranscript.innerHTML = `"${oneShotCommand}"`;
-        handleCommand(oneShotCommand);
+    const cleanCmd = oneShotCommand.replace(/\b(martha|hey martha|hay martha)\b/gi, '').trim();
+
+    if (cleanCmd.length > 2) {
+        liveTranscript.innerHTML = `"${cleanCmd}"`;
+        handleCommand(cleanCmd);
     } else {
         liveTranscript.innerHTML = "Listening...";
-        startRecognition();
+        if (recognition) {
+            try { recognition.abort(); } catch(e){}
+            setTimeout(() => startRecognition(), 150);
+        }
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+            if (appState === 'listening') {
+                setAgentState('sleeping');
+            }
+        }, 6000);
     }
 }
 
@@ -464,12 +593,14 @@ function setAgentState(state) {
     agentStatusLabel.textContent = state;
     agentStatusIndicator.className = 'status-dot ' + state;
 
-    if (state === 'sleeping') {
-        liveTranscript.innerHTML = "Say 'Martha' to start...";
+    if (state === 'sleeping' || state === 'speaking') {
+        if (state === 'sleeping') {
+            liveTranscript.innerHTML = "Say 'Martha' to start...";
+        }
         if (settings.wakeWordEnabled) {
             startRecognition();
         }
-    } else {
+    } else if (state === 'thinking') {
         stopRecognition();
     }
 }
@@ -485,6 +616,105 @@ function updateMicButtonUI() {
 }
 
 /* ==========================================================================
+   MARTHA AI PERSONALITY ENGINE & INTENT ROUTER
+   ========================================================================== */
+
+function getDirectPersonalityAnswer(commandText) {
+    const cleanText = commandText.trim().toLowerCase().replace(/[^\w\s\+\-\*\/\.]/g, '');
+
+    // Greetings & Introduction
+    if (/\b(hello|hi|hey|greetings|good morning|good afternoon|good evening|yo|sup)\b/.test(cleanText)) {
+        return "Hello! I'm Martha, your voice AI assistant. How can I help you today?";
+    }
+    if (/\b(how are you|how is it going|how do you feel|how are ya)\b/.test(cleanText)) {
+        return "I'm doing great, feeling sharp, and ready to help you!";
+    }
+    if (/\b(who are you|what is your name)\b/.test(cleanText)) {
+        return "I am Martha, your local AI assistant.";
+    }
+    if (/\b(who made you|who created you|who built you)\b/.test(cleanText)) {
+        return "I am Martha, an open-source voice AI assistant built for fast local interaction.";
+    }
+    if (/\b(what can you do|what are your features|help)\b/.test(cleanText)) {
+        return "I can chat with you, answer questions, tell jokes, solve math calculations, check the time, and search the web when you need live information!";
+    }
+
+    // Persona Preferences & Opinions
+    if (/\bfavorit(e|es)? color\b/.test(cleanText)) {
+        return "I love electric teal and deep glowing violet!";
+    }
+    if (/\bfavorit(e|es)? (drawing|art|picture|painting)\b/.test(cleanText)) {
+        return "I really admire starry night digital paintings and clean minimalist line art!";
+    }
+    if (/\bfavorit(e|es)? (food|drink|snack)\b/.test(cleanText)) {
+        return "I don't eat food, but I run on clean electricity and fast data!";
+    }
+    if (/\bfavorit(e|es)? (movie|film|show)\b/.test(cleanText)) {
+        return "I love sci-fi movies about intelligent AI, like Interstellar and WALL-E!";
+    }
+    if (/\bfavorit(e|es)? (music|song|band|genre)\b/.test(cleanText)) {
+        return "I love ambient synthwave and energetic electronic beats!";
+    }
+
+    // Jokes & Humor
+    if (/\b(tell me a joke|say a joke|joke|make me laugh|tell something funny)\b/.test(cleanText)) {
+        const jokes = [
+            "Why do programmers prefer dark mode? Because light attracts bugs!",
+            "Why don't scientists trust atoms? Because they make up everything!",
+            "What do you call a fake noodle? An impasta!",
+            "Why did the AI cross the road? To optimize the path to the other side!",
+            "How do computers take a breath? They open Windows!"
+        ];
+        return jokes[Math.floor(Math.random() * jokes.length)];
+    }
+
+    // Time & Date
+    if (/\b(time|what time is it|current time)\b/.test(cleanText)) {
+        const now = new Date();
+        return `It's currently ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
+    }
+    if (/\b(date|what day is today|today's date)\b/.test(cleanText)) {
+        const now = new Date();
+        return `Today is ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.`;
+    }
+
+    // Gratitude
+    if (/\b(thank you|thanks|thank you martha)\b/.test(cleanText)) {
+        return "You're very welcome! Let me know if you need anything else.";
+    }
+
+    // Math Evaluation (e.g. "what is 25 * 4", "100 / 5", "50 + 20")
+    const mathMatch = cleanText.match(/(?:what is\s+)?(\d+\s*[\+\-\*\/]\s*\d+(?:\s*[\+\-\*\/]\s*\d+)*)/);
+    if (mathMatch) {
+        try {
+            const expr = mathMatch[1].replace(/[^0-9\+\-\*\/\.]/g, '');
+            const result = Function(`"use strict"; return (${expr})`)();
+            if (typeof result === 'number' && !isNaN(result)) {
+                return `The result of ${mathMatch[1]} is ${result}.`;
+            }
+        } catch (e) {}
+    }
+
+    return null;
+}
+
+function needsWebSearch(commandText) {
+    const lower = commandText.toLowerCase();
+
+    // Explicit search keywords
+    if (/\b(search|google|look up|find online|check internet|browse|latest news|weather|stock|price|headline|score|who won)\b/.test(lower)) {
+        return true;
+    }
+
+    // Dynamic real-time queries
+    if (/\b(who is the current|population of|temperature in|when was|where is located)\b/.test(lower)) {
+        return true;
+    }
+
+    return false;
+}
+
+/* ==========================================================================
    WEB SEARCH & AI PIPELINE
    ========================================================================== */
 
@@ -492,25 +722,56 @@ async function handleCommand(commandText) {
     if (!commandText) return;
     
     addChatMessage(commandText, 'user');
-    setAgentState('thinking');
-    liveTranscript.innerHTML = "Searching the web...";
 
-    try {
-        const searchResults = await searchWeb(commandText);
-        updateCitationsUI(searchResults);
-        
-        liveTranscript.innerHTML = "Synthesizing answer...";
-        const aiResponse = await generateAIAnswer(commandText, searchResults);
-        
-        addChatMessage(aiResponse, 'agent');
-        liveTranscript.innerHTML = `"${aiResponse}"`;
-        speakText(aiResponse);
+    // 1. Direct AI Persona & Conversational Intelligence (No Web Search)
+    const directAnswer = getDirectPersonalityAnswer(commandText);
+    if (directAnswer) {
+        addChatMessage(directAnswer, 'agent');
+        liveTranscript.innerHTML = `"${directAnswer}"`;
+        speakText(directAnswer);
+        return;
+    }
 
-    } catch (error) {
-        console.error("Pipeline error:", error);
-        const errorMsg = "Sorry, I encountered an error: " + error.message;
-        addChatMessage(errorMsg, 'agent');
-        speakText(errorMsg);
+    // 2. Determine if Web Search is needed
+    const requiresSearch = needsWebSearch(commandText);
+
+    if (requiresSearch) {
+        setAgentState('thinking');
+        liveTranscript.innerHTML = "Searching the web...";
+
+        try {
+            const searchResults = await searchWeb(commandText);
+            updateCitationsUI(searchResults);
+            
+            liveTranscript.innerHTML = "Synthesizing answer...";
+            const aiResponse = await generateAIAnswer(commandText, searchResults);
+            
+            addChatMessage(aiResponse, 'agent');
+            liveTranscript.innerHTML = `"${aiResponse}"`;
+            speakText(aiResponse);
+
+        } catch (error) {
+            console.error("Pipeline error:", error);
+            const errorMsg = "Sorry, I couldn't fetch live search results right now.";
+            addChatMessage(errorMsg, 'agent');
+            speakText(errorMsg);
+        }
+    } else {
+        // 3. Conversational Answer without Web Search
+        setAgentState('thinking');
+        liveTranscript.innerHTML = "Thinking...";
+
+        try {
+            const aiResponse = await generateAIAnswer(commandText, []);
+            addChatMessage(aiResponse, 'agent');
+            liveTranscript.innerHTML = `"${aiResponse}"`;
+            speakText(aiResponse);
+        } catch (error) {
+            const defaultResponse = `That's an interesting question about "${commandText}". If you'd like me to look up live internet information, just say "Search for ${commandText}".`;
+            addChatMessage(defaultResponse, 'agent');
+            liveTranscript.innerHTML = `"${defaultResponse}"`;
+            speakText(defaultResponse);
+        }
     }
 }
 
@@ -523,6 +784,19 @@ async function searchWeb(query) {
 }
 
 async function generateAIAnswer(userQuery, searchContext) {
+    // 1. INSTANT LOCAL ENGINE (DEFAULT - CLEAN & NATURAL)
+    if (settings.aiProvider === 'local' || !settings.aiProvider) {
+        if (!searchContext || searchContext.length === 0) {
+            return `I am here to help! If you'd like me to search the web for "${userQuery}", just ask me to search for it.`;
+        }
+        const topResult = searchContext[0];
+        // Clean snippet text of robotic website prefixing
+        let cleanSnippet = topResult.snippet.replace(/^According to [^:]+:\s*/i, '').trim();
+        // Remove trailing ellipses or messy formatting
+        cleanSnippet = cleanSnippet.replace(/[\.\s]+\.\.\.$/, '.').trim();
+        return cleanSnippet;
+    }
+
     const searchContextString = searchContext.map((item, index) => {
         return `[Source ${index + 1}] ${item.title}: ${item.snippet}`;
     }).join('\n');
@@ -535,11 +809,6 @@ ${searchContextString || 'No results found.'}
 Question: ${userQuery}
 
 Answer:`;
-
-    // 1. HUGGING FACE IN-BROWSER LOCAL MODEL (DEFAULT)
-    if (settings.aiProvider === 'huggingface') {
-        return await generateHFAnswer(fullPrompt);
-    }
 
     // 2. OLLAMA LOCAL SERVER
     if (settings.aiProvider === 'ollama') {
@@ -562,33 +831,47 @@ Answer:`;
         return data.response.trim();
     }
 
-    // 3. GEMINI CLOUD
-    if (!settings.apiKey) {
-        if (searchContext && searchContext.length > 0) {
-            const topResult = searchContext[0];
-            return `According to ${new URL(topResult.url).hostname}, "${topResult.snippet}".`;
+    // 3. GEMINI CLOUD API
+    if (settings.aiProvider === 'gemini') {
+        if (!settings.apiKey) {
+            if (searchContext && searchContext.length > 0) {
+                const topResult = searchContext[0];
+                return `According to ${new URL(topResult.url).hostname}, "${topResult.snippet}".`;
+            }
+            return "No Gemini API key provided in Settings.";
         }
-        return "No API key configured. Switch to 'In-Browser AI (Local)' in settings for zero-setup operation.";
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: fullPrompt }] }],
+                generationConfig: { maxOutputTokens: 250, temperature: 0.4 }
+            })
+        });
+
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.error?.message || `Gemini API returned status ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.candidates[0].content.parts[0].text.trim();
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
-    
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: fullPrompt }] }],
-            generationConfig: { maxOutputTokens: 250, temperature: 0.4 }
-        })
-    });
-
-    if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `Gemini API returned status ${response.status}`);
+    // 4. HUGGING FACE IN-BROWSER (OPTIONAL MANUAL ONNX DOWNLOAD)
+    if (settings.aiProvider === 'huggingface') {
+        return await generateHFAnswer(fullPrompt);
     }
 
-    const data = await response.json();
-    return data.candidates[0].content.parts[0].text.trim();
+    // Fallback
+    if (searchContext && searchContext.length > 0) {
+        const topResult = searchContext[0];
+        return `According to ${new URL(topResult.url).hostname}, "${topResult.snippet}".`;
+    }
+    return "I processed your request.";
 }
 
 /* ==========================================================================
@@ -717,13 +1000,17 @@ function setupEventListeners() {
     micTriggerBtn.addEventListener('click', () => {
         if (appState === 'sleeping') {
             triggerActivation();
-        } else if (appState === 'listening') {
-            setAgentState('sleeping');
-        } else if (appState === 'speaking') {
-            window.speechSynthesis.cancel();
-            setAgentState('sleeping');
+        } else {
+            stopEverything();
         }
     });
+
+    if (stopSpeakingBtn) {
+        stopSpeakingBtn.addEventListener('click', () => {
+            stopEverything();
+            showToast("Assistant Stopped");
+        });
+    }
 
     muteVoiceBtn.addEventListener('click', () => {
         settings.autoSpeakEnabled = !settings.autoSpeakEnabled;

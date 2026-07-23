@@ -96,6 +96,9 @@
                     <button id="mic-trigger-btn" class="action-btn mic-btn" title="Click to speak">
                         <i class="fa-solid fa-microphone"></i>
                     </button>
+                    <button id="stop-speaking-btn" class="action-btn stop-btn" title="Stop Assistant (or say 'Stop')">
+                        <i class="fa-solid fa-square"></i>
+                    </button>
                     <button id="mute-voice-btn" class="action-btn mute-btn" title="Mute Speech Synthesis">
                         <i class="fa-solid fa-volume-high"></i>
                     </button>
@@ -127,15 +130,16 @@
         </div>
         <div class="drawer-content">
             <div class="setting-group">
-                <label for="ai-provider">AI Provider</label>
+                <label for="ai-provider">AI Engine Provider</label>
                 <div class="select-wrapper">
                     <select id="ai-provider">
-                        <option value="huggingface" selected>In-Browser AI (Local)</option>
-                        <option value="gemini">Google Gemini (Cloud)</option>
+                        <option value="local" selected>Instant Local Engine (Fast / No Download)</option>
+                        <option value="gemini">Google Gemini (Cloud API)</option>
                         <option value="ollama">Ollama (Local Server)</option>
+                        <option value="huggingface">In-Browser LLM (Downloads ~350MB ONNX)</option>
                     </select>
                 </div>
-                <span class="help-text" id="hf-help-text">Runs a lightweight AI model directly in your browser. ~350MB download on first use, cached afterwards.</span>
+                <span class="help-text" id="hf-help-text" style="display: none;">Downloads a ~350MB ONNX model file into your browser cache on first use.</span>
             </div>
 
             <div class="setting-group" id="gemini-key-group" style="display: none;">
@@ -165,12 +169,13 @@
             </div>
 
             <div class="setting-group">
-                <label for="voice-select">Speech Synthesis Voice</label>
+                <label for="voice-select">Speech Synthesis Voice (Local TTS)</label>
                 <div class="select-wrapper">
                     <select id="voice-select">
                         <option value="">Detecting voices...</option>
                     </select>
                 </div>
+                <span class="help-text">Uses system voices local to your device — 100% offline, zero API required.</span>
             </div>
 
             <div class="setting-group">
@@ -207,10 +212,6 @@
     <!-- Visual Status Notification -->
     <div id="toast" class="toast">Settings Saved</div>
 
-    <!-- Audio Chimes -->
-    <audio id="chime-start" src="voice.mp3" preload="auto"></audio>
-    <audio id="chime-success" src="https://assets.mixkit.co/active_storage/sfx/2019/2019-84.wav" preload="auto"></audio>
-    
     <!-- Model download progress (shown during first-run HF model fetch) -->
     <div id="model-progress" class="model-progress" style="display: none;">
         <div class="model-progress-text" id="model-progress-text">Downloading local AI model...</div>

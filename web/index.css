@@ -527,6 +527,24 @@ body {
     box-shadow: none !important;
 }
 
+.stop-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #ef4444;
+    font-size: 15px;
+    transition: var(--transition-smooth);
+}
+
+.stop-btn:hover {
+    background: rgba(239, 68, 68, 0.85);
+    color: white;
+    transform: scale(1.08);
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.5);
+}
+
 .mute-btn {
     width: 44px;
     height: 44px;

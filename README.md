@@ -1,14 +1,20 @@
 # Martha
-Martha is an open-source alternative to voice assistants like Amazon Alexa and Google Assistant.
 
-    Project Status: Active Development
+Martha is an open-source, 100% local voice AI assistant alternative to Amazon Alexa and Google Assistant.
 
-    Martha is currently under active development. You may encounter bugs or incomplete features while running the project. If you find any issues, please report them so they can be fixed!
+## Features
 
-Contributing and Bug Reporting
+- 🗣️ **Local Offline Text-To-Speech (TTS)**: Uses system voice engines (macOS `say`, Windows `SAPI5`, Linux `espeak` / Web Speech API) — zero cloud API keys required.
+- 🤖 **In-Browser Local AI**: Runs local LLMs via Transformers.js (Qwen/Llama) or connects to local Ollama instance.
+- 🔍 **Web Research**: Conducts real-time web searches and synthesizes clean responses with citations.
+- 🎙️ **Wake Word & Voice Commands**: Continuous listening for "Martha" with interactive visual orb UI and local Web Audio synthesized sound chimes.
 
-Feedback and bug reports are welcome! If you encounter a bug or have a feature suggestion:
+## Quickstart
 
-    Check the Issues tab to see if the topic has already been opened.
+Run the backend server:
 
-    If it hasn't, open a new issue detailing the problem and the steps needed to reproduce it.
+```bash
+python martha.py
+```
+
+Then open your browser at `http://localhost:8000`.

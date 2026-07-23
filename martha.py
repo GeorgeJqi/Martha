@@ -39,6 +39,17 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         # Intercept Search API
         if parsed_url.path == '/api/search':
             self.handle_search(parsed_url.query)
+        # Intercept Local TTS GET API
+        elif parsed_url.path == '/api/tts':
+            params = urllib.parse.parse_qs(parsed_url.query)
+            action = params.get('action', [''])[0].strip()
+            if action == 'stop':
+                self.stop_speech_locally()
+            else:
+                text = params.get('text', [''])[0].strip()
+                if text:
+                    self.speak_locally(text)
+            self.send_json_response({"status": "success"})
         else:
             # Fallback to standard static file serving
             super().do_GET()
@@ -46,6 +57,24 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed_url = urllib.parse.urlparse(self.path)
         
+        # Local TTS POST API (100% offline, native OS synthesis)
+        if parsed_url.path == '/api/tts':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            try:
+                req_data = json.loads(post_data)
+                if req_data.get('action') == 'stop':
+                    self.stop_speech_locally()
+                else:
+                    text = req_data.get('text', '').strip()
+                    if text:
+                        self.speak_locally(text)
+                self.send_json_response({"status": "success"})
+            except Exception as e:
+                print(f"Local TTS error: {e}")
+                self.send_json_response({"error": str(e)}, status=500)
+            return
+
         # Proxy route for local Ollama LLM queries to bypass browser CORS rules
         if parsed_url.path == '/api/local-chat':
             content_length = int(self.headers.get('Content-Length', 0))
@@ -82,6 +111,44 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def speak_locally(self, text):
+        """Perform 100% offline local TTS using host operating system voices."""
+        clean_text = re.sub(r'["\'\\]', '', text)
+        if not clean_text:
+            return
+        print(f"Local OS TTS speaking: '{clean_text[:60]}...'")
+        try:
+            if sys.platform == 'darwin':
+                subprocess.Popen(['say', clean_text])
+            elif sys.platform == 'win32':
+                cmd = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{clean_text}')"
+                subprocess.Popen(['powershell', '-Command', cmd], creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+            else:
+                try:
+                    subprocess.Popen(['espeak', clean_text])
+                except Exception:
+                    try:
+                        subprocess.Popen(['spd-say', clean_text])
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Failed to execute local OS TTS: {e}")
+
+    def stop_speech_locally(self):
+        """Stop any active local OS speech process immediately."""
+        try:
+            if sys.platform == 'darwin':
+                subprocess.Popen(['killall', 'say'])
+            elif sys.platform == 'win32':
+                subprocess.Popen(['taskkill', '/F', '/IM', 'powershell.exe'], creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+            else:
+                try:
+                    subprocess.Popen(['killall', 'espeak'])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def handle_search(self, query_string):
         params = urllib.parse.parse_qs(query_string)
