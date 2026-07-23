@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Martha — Automated Web Search AI Agent</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Main Style Sheet -->
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="glow-orb glow-orb-1"></div>
+    <div class="glow-orb glow-orb-2"></div>
+
+    <div class="app-container">
+        <!-- Main Layout -->
+        <header class="app-header">
+            <div class="brand">
+                <i class="fa-solid fa-wand-magic-sparkles logo-icon"></i>
+                <h1>MARTHA</h1>
+                <span class="badge">v1.0 Agent</span>
+            </div>
+            <div class="header-actions">
+                <button id="toggle-settings-btn" class="icon-btn" title="Open Settings">
+                    <i class="fa-solid fa-sliders"></i>
+                </button>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <!-- Left Side: Chat log & history -->
+            <section class="panel chat-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-message-captions"></i> Session Log</h2>
+                    <button id="clear-chat-btn" class="text-btn" title="Clear Conversations">Clear</button>
+                </div>
+                <div id="chat-messages" class="chat-messages">
+                    <div class="system-message">
+                        <p>Martha is initialized. Wake word is active. Say <strong>"Martha"</strong> or press the mic button to speak.</p>
+                    </div>
+                </div>
+                <div class="text-input-container">
+                    <input type="text" id="text-query-input" placeholder="Type a message or call 'Martha'..." autocomplete="off">
+                    <button id="send-query-btn" class="send-btn" title="Send message"><i class="fa-solid fa-arrow-up"></i></button>
+                </div>
+            </section>
+
+            <!-- Center: Voice Orb & Visualizer -->
+            <section class="panel visualizer-panel">
+                <div class="status-container">
+                    <span id="agent-status-label" class="status-label">Sleeping</span>
+                    <span id="agent-status-indicator" class="status-dot sleeping"></span>
+                </div>
+
+                <div class="orb-container">
+                    <!-- The Glowing Orb -->
+                    <div id="martha-orb" class="martha-orb state-sleeping">
+                        <div class="orb-core"></div>
+                        <div class="orb-ring orb-ring-1"></div>
+                        <div class="orb-ring orb-ring-2"></div>
+                        <div class="orb-ring orb-ring-3"></div>
+                    </div>
+                </div>
+
+                <div class="waveform-container">
+                    <div id="waveform" class="waveform">
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                        <span class="bar"></span>
+                    </div>
+                </div>
+
+                <div class="transcript-preview">
+                    <p id="live-transcript" class="live-transcript">"Martha, what is..."</p>
+                </div>
+
+                <div class="control-actions">
+                    <button id="mic-trigger-btn" class="action-btn mic-btn" title="Click to speak">
+                        <i class="fa-solid fa-microphone"></i>
+                    </button>
+                    <button id="mute-voice-btn" class="action-btn mute-btn" title="Mute Speech Synthesis">
+                        <i class="fa-solid fa-volume-high"></i>
+                    </button>
+                </div>
+            </section>
+
+            <!-- Right Side: Web Search citations -->
+            <section class="panel citations-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-magnifying-glass"></i> Web Research</h2>
+                    <span id="citation-count" class="badge">0 Results</span>
+                </div>
+                <div id="search-citations" class="search-citations">
+                    <div class="no-citations-message">
+                        <i class="fa-solid fa-globe"></i>
+                        <p>No active web search conducted yet.</p>
+                        <span>When Martha searches the web, raw sources will appear here.</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Right Slide-out Drawer: Settings -->
+    <aside id="settings-drawer" class="settings-drawer">
+        <div class="drawer-header">
+            <h3>Configuration</h3>
+            <button id="close-settings-btn" class="icon-btn" title="Close"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="drawer-content">
+            <div class="setting-group">
+                <label for="ai-provider">AI Provider</label>
+                <div class="select-wrapper">
+                    <select id="ai-provider">
+                        <option value="huggingface" selected>In-Browser AI (Local)</option>
+                        <option value="gemini">Google Gemini (Cloud)</option>
+                        <option value="ollama">Ollama (Local Server)</option>
+                    </select>
+                </div>
+                <span class="help-text" id="hf-help-text">Runs a lightweight AI model directly in your browser. ~350MB download on first use, cached afterwards.</span>
+            </div>
+
+            <div class="setting-group" id="gemini-key-group" style="display: none;">
+                <label for="gemini-api-key">Gemini API Key</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-key"></i>
+                    <input type="password" id="gemini-api-key" placeholder="AIzaSy...">
+                </div>
+                <span class="help-text">Direct browser LLM connection. Obtain a free key in <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>. Saved locally.</span>
+            </div>
+
+            <div class="setting-group" id="ollama-model-group" style="display: none;">
+                <label for="ollama-model">Ollama Model</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-brain"></i>
+                    <input type="text" id="ollama-model" placeholder="llama3.2">
+                </div>
+                <span class="help-text">Lightweight model name running in Ollama.</span>
+            </div>
+
+            <div class="setting-group" id="ollama-url-group" style="display: none;">
+                <label for="ollama-url">Ollama Server URL</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-server"></i>
+                    <input type="text" id="ollama-url" placeholder="http://localhost:11434">
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label for="voice-select">Speech Synthesis Voice</label>
+                <div class="select-wrapper">
+                    <select id="voice-select">
+                        <option value="">Detecting voices...</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label for="speech-rate">Voice Speed</label>
+                <input type="range" id="speech-rate" min="0.5" max="2" step="0.1" value="1.0">
+                <div class="range-labels">
+                    <span>0.5x</span>
+                    <span>1.0x</span>
+                    <span>2.0x</span>
+                </div>
+            </div>
+
+            <div class="setting-group checkbox-group">
+                <input type="checkbox" id="wake-word-enabled" checked>
+                <label for="wake-word-enabled">Continuous Wake Word ("Martha")</label>
+            </div>
+
+            <div class="setting-group checkbox-group">
+                <input type="checkbox" id="sound-effects-enabled" checked>
+                <label for="sound-effects-enabled">Start / Finish Chimes</label>
+            </div>
+
+            <div class="setting-group checkbox-group">
+                <input type="checkbox" id="auto-speak-enabled" checked>
+                <label for="auto-speak-enabled">Auto-speak Responses</label>
+            </div>
+
+            <div class="settings-footer">
+                <button id="save-settings-btn" class="primary-btn">Save settings</button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Visual Status Notification -->
+    <div id="toast" class="toast">Settings Saved</div>
+
+    <!-- Audio Chimes -->
+    <audio id="chime-start" src="voice.mp3" preload="auto"></audio>
+    <audio id="chime-success" src="https://assets.mixkit.co/active_storage/sfx/2019/2019-84.wav" preload="auto"></audio>
+    
+    <!-- Model download progress (shown during first-run HF model fetch) -->
+    <div id="model-progress" class="model-progress" style="display: none;">
+        <div class="model-progress-text" id="model-progress-text">Downloading local AI model...</div>
+        <div class="model-progress-bar-bg">
+            <div class="model-progress-bar" id="model-progress-bar"></div>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
