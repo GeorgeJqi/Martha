@@ -2,14 +2,32 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Martha — Automated Web Search AI Agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Martha — Voice AI Assistant</title>
+    
+    <!-- Mobile & PWA Meta Tags -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Martha">
+    <meta name="theme-color" content="#09090e">
+    <meta name="description" content="Martha is an open-source, local voice AI assistant and automated web research agent for Desktop, Android, and iOS.">
+
+    <!-- Icons and Manifest -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="64x64" href="icons/favicon.png">
+    <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
     <!-- FontAwesome for Premium Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
     <!-- Main Style Sheet -->
     <link rel="stylesheet" href="index.css">
 </head>
@@ -19,30 +37,38 @@
     <div class="glow-orb glow-orb-2"></div>
 
     <div class="app-container">
-        <!-- Main Layout -->
+        <!-- Main Layout Header -->
         <header class="app-header">
             <div class="brand">
                 <i class="fa-solid fa-wand-magic-sparkles logo-icon"></i>
                 <h1>MARTHA</h1>
-                <span class="badge">v1.0 Agent</span>
+                <span class="badge mobile-hidden">v1.1 AI Agent</span>
             </div>
             <div class="header-actions">
+                <button id="qr-connect-btn" class="header-pill-btn" title="Connect Phone / QR Code">
+                    <i class="fa-solid fa-mobile-screen"></i>
+                    <span class="btn-label">Mobile Connect</span>
+                </button>
+                <button id="install-pwa-btn" class="header-pill-btn pwa-header-btn" title="Install App" style="display: none;">
+                    <i class="fa-solid fa-download"></i>
+                    <span class="btn-label">Install App</span>
+                </button>
                 <button id="toggle-settings-btn" class="icon-btn" title="Open Settings">
                     <i class="fa-solid fa-sliders"></i>
                 </button>
             </div>
         </header>
 
-        <main class="app-main">
+        <main class="app-main" id="app-main">
             <!-- Left Side: Chat log & history -->
-            <section class="panel chat-panel">
+            <section class="panel chat-panel" id="panel-chat">
                 <div class="panel-header">
                     <h2><i class="fa-solid fa-message-captions"></i> Session Log</h2>
                     <button id="clear-chat-btn" class="text-btn" title="Clear Conversations">Clear</button>
                 </div>
                 <div id="chat-messages" class="chat-messages">
                     <div class="system-message">
-                        <p>Martha is initialized. Wake word is active. Say <strong>"Martha"</strong> or press the mic button to speak.</p>
+                        <p>Martha is initialized. Wake word is active. Say <strong>"Martha"</strong> or tap the orb / mic button to speak.</p>
                     </div>
                 </div>
                 <div class="text-input-container">
@@ -52,7 +78,7 @@
             </section>
 
             <!-- Center: Voice Orb & Visualizer -->
-            <section class="panel visualizer-panel">
+            <section class="panel visualizer-panel active-mobile-view" id="panel-voice">
                 <div class="status-container">
                     <span id="agent-status-label" class="status-label">Sleeping</span>
                     <span id="agent-status-indicator" class="status-dot sleeping"></span>
@@ -60,7 +86,7 @@
 
                 <div class="orb-container">
                     <!-- The Glowing Orb -->
-                    <div id="martha-orb" class="martha-orb state-sleeping">
+                    <div id="martha-orb" class="martha-orb state-sleeping" title="Tap to talk to Martha">
                         <div class="orb-core"></div>
                         <div class="orb-ring orb-ring-1"></div>
                         <div class="orb-ring orb-ring-2"></div>
@@ -93,7 +119,7 @@
                 </div>
 
                 <div class="control-actions">
-                    <button id="mic-trigger-btn" class="action-btn mic-btn" title="Click to speak">
+                    <button id="mic-trigger-btn" class="action-btn mic-btn" title="Click or tap to speak">
                         <i class="fa-solid fa-microphone"></i>
                     </button>
                     <button id="stop-speaking-btn" class="action-btn stop-btn" title="Stop Assistant (or say 'Stop')">
@@ -106,7 +132,7 @@
             </section>
 
             <!-- Right Side: Web Search citations -->
-            <section class="panel citations-panel">
+            <section class="panel citations-panel" id="panel-research">
                 <div class="panel-header">
                     <h2><i class="fa-solid fa-magnifying-glass"></i> Web Research</h2>
                     <span id="citation-count" class="badge">0 Results</span>
@@ -120,6 +146,26 @@
                 </div>
             </section>
         </main>
+
+        <!-- Mobile Bottom Navigation Bar (Visible on mobile/tablet) -->
+        <nav class="mobile-bottom-nav" id="mobile-bottom-nav">
+            <button class="mobile-nav-item active" data-tab="voice" id="tab-btn-voice">
+                <div class="nav-icon-wrapper"><i class="fa-solid fa-microphone-lines"></i></div>
+                <span>Voice Orb</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="chat" id="tab-btn-chat">
+                <div class="nav-icon-wrapper"><i class="fa-solid fa-message-captions"></i></div>
+                <span>Chat</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="research" id="tab-btn-research">
+                <div class="nav-icon-wrapper"><i class="fa-solid fa-globe"></i></div>
+                <span>Research</span>
+            </button>
+            <button class="mobile-nav-item" data-tab="settings" id="tab-btn-settings">
+                <div class="nav-icon-wrapper"><i class="fa-solid fa-sliders"></i></div>
+                <span>Settings</span>
+            </button>
+        </nav>
     </div>
 
     <!-- Right Slide-out Drawer: Settings -->
@@ -129,6 +175,16 @@
             <button id="close-settings-btn" class="icon-btn" title="Close"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <div class="drawer-content">
+            <!-- Mobile / Remote Server Connection -->
+            <div class="setting-group">
+                <label for="server-url">Martha Backend Host (LAN / Remote)</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-network-wired"></i>
+                    <input type="text" id="server-url" placeholder="http://192.168.1.xxx:8000 (or leave empty for local)">
+                </div>
+                <span class="help-text">For mobile devices on Wi-Fi connecting to your PC's Martha server.</span>
+            </div>
+
             <div class="setting-group">
                 <label for="ai-provider">AI Engine Provider</label>
                 <div class="select-wrapper">
@@ -194,6 +250,11 @@
             </div>
 
             <div class="setting-group checkbox-group">
+                <input type="checkbox" id="haptics-enabled" checked>
+                <label for="haptics-enabled">Mobile Haptic Vibrations</label>
+            </div>
+
+            <div class="setting-group checkbox-group">
                 <input type="checkbox" id="sound-effects-enabled" checked>
                 <label for="sound-effects-enabled">Start / Finish Chimes</label>
             </div>
@@ -208,6 +269,61 @@
             </div>
         </div>
     </aside>
+
+    <!-- Modal: QR Code / Mobile LAN Connect -->
+    <div id="qr-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-mobile-screen-button"></i> Connect Android or iPhone</h3>
+                <button id="close-qr-modal-btn" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-subtitle">Scan this QR code with your phone camera on your home Wi-Fi to launch Martha immediately on mobile:</p>
+                <div class="qr-canvas-container">
+                    <div id="qr-code-display" class="qr-code-box"></div>
+                </div>
+                <div class="lan-url-box">
+                    <span id="lan-url-text">http://192.168.x.x:8000</span>
+                    <button id="copy-lan-url-btn" class="icon-btn" title="Copy LAN URL"><i class="fa-solid fa-copy"></i></button>
+                </div>
+                <div class="mobile-tips">
+                    <div class="tip-item"><i class="fa-brands fa-apple"></i> <strong>iOS Safari:</strong> Tap Share <i class="fa-solid fa-arrow-up-from-bracket"></i> → <em>Add to Home Screen</em></div>
+                    <div class="tip-item"><i class="fa-brands fa-android"></i> <strong>Android Chrome:</strong> Tap <i class="fa-solid fa-ellipsis-vertical"></i> → <em>Install App</em></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: iOS Safari Install Instructions Guide -->
+    <div id="ios-install-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3><i class="fa-brands fa-apple"></i> Install Martha on iPhone & iPad</h3>
+                <button id="close-ios-modal-btn" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <ol class="ios-steps">
+                    <li>Tap the <strong>Share</strong> button <i class="fa-solid fa-arrow-up-from-bracket ios-share-icon"></i> at the bottom of Safari.</li>
+                    <li>Scroll down and select <strong>"Add to Home Screen"</strong> <i class="fa-solid fa-plus-square"></i>.</li>
+                    <li>Tap <strong>"Add"</strong> in the top right.</li>
+                </ol>
+                <p class="ios-note">Martha will run like a native standalone app with zero address bars, offline caching, and instant launch!</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- PWA Install Banner (Bottom Toast for Mobile Chrome/Edge/Firefox) -->
+    <div id="pwa-install-banner" class="pwa-banner" style="display: none;">
+        <img src="icons/icon-192.png" alt="Martha Logo" class="pwa-banner-icon">
+        <div class="pwa-banner-content">
+            <strong>Install Martha App</strong>
+            <span>Install on Android / iOS for offline voice AI</span>
+        </div>
+        <div class="pwa-banner-actions">
+            <button id="pwa-banner-dismiss" class="text-btn">Later</button>
+            <button id="pwa-banner-install" class="primary-btn btn-sm">Install</button>
+        </div>
+    </div>
 
     <!-- Visual Status Notification -->
     <div id="toast" class="toast">Settings Saved</div>

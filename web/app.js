@@ -1,34 +1,41 @@
 /* ==========================================================================
-   MARTHA - CLIENT FRONTEND LOGIC (ES Module)
-   In-Browser Local AI, Speech Recognition, Web Search, Voice Synthesis
+   MARTHA - OPTIMIZED CLIENT FRONTEND ENGINE
+   Multi-Platform Local Voice AI Assistant, Web Research & Speech Engine
    ========================================================================== */
 
-// Import Hugging Face Transformers.js for local in-browser AI
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
 
-// Disable local model checks (we always fetch from HF hub / browser cache)
 env.allowLocalModels = false;
 
-// App State
+// Register Service Worker for PWA & Offline Support
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(err => console.warn('[PWA] SW registration:', err));
+    });
+}
+
+// State & Core Instances
 let appState = 'sleeping';
 let recognition = null;
 let isRecognitionActive = false;
 let currentUtterance = null;
 let synthVoices = [];
 let silenceTimer = null;
-let hfGenerator = null; // Hugging Face text generation pipeline instance
+let hfGenerator = null;
 let hfModelLoading = false;
+let deferredInstallPrompt = null;
+let currentMobileTab = 'voice';
+let audioCtx = null;
+let isAudioUnlocked = false;
 
-// Settings (Loaded from LocalStorage or Defaults)
-if (localStorage.getItem('martha_ai_provider') === 'huggingface') {
-    localStorage.setItem('martha_ai_provider', 'local');
-}
-
+// Settings
 const settings = {
+    serverUrl: localStorage.getItem('martha_server_url') || '',
     apiKey: localStorage.getItem('martha_api_key') || '',
     wakeWordEnabled: localStorage.getItem('martha_wake_word_enabled') !== 'false',
     voiceName: localStorage.getItem('martha_voice_name') || '',
     speechRate: parseFloat(localStorage.getItem('martha_speech_rate') || '1.0'),
+    hapticsEnabled: localStorage.getItem('martha_haptics_enabled') !== 'false',
     soundEffectsEnabled: localStorage.getItem('martha_sound_effects') !== 'false',
     autoSpeakEnabled: localStorage.getItem('martha_auto_speak') !== 'false',
     aiProvider: localStorage.getItem('martha_ai_provider') || 'local',
@@ -36,49 +43,107 @@ const settings = {
     ollamaUrl: localStorage.getItem('martha_ollama_url') || 'http://localhost:11434'
 };
 
-// UI Elements
-const marthaOrb = document.getElementById('martha-orb');
-const agentStatusLabel = document.getElementById('agent-status-label');
-const agentStatusIndicator = document.getElementById('agent-status-indicator');
-const liveTranscript = document.getElementById('live-transcript');
-const chatMessages = document.getElementById('chat-messages');
-const searchCitations = document.getElementById('search-citations');
-const citationCountBadge = document.getElementById('citation-count');
-const textQueryInput = document.getElementById('text-query-input');
+// UI Elements Cache
+const $ = (id) => document.getElementById(id);
+const marthaOrb = $('martha-orb');
+const agentStatusLabel = $('agent-status-label');
+const agentStatusIndicator = $('agent-status-indicator');
+const liveTranscript = $('live-transcript');
+const chatMessages = $('chat-messages');
+const searchCitations = $('search-citations');
+const citationCountBadge = $('citation-count');
+const textQueryInput = $('text-query-input');
 
-// Buttons
-const toggleSettingsBtn = document.getElementById('toggle-settings-btn');
-const closeSettingsBtn = document.getElementById('close-settings-btn');
-const settingsDrawer = document.getElementById('settings-drawer');
-const saveSettingsBtn = document.getElementById('save-settings-btn');
-const micTriggerBtn = document.getElementById('mic-trigger-btn');
-const stopSpeakingBtn = document.getElementById('stop-speaking-btn');
-const muteVoiceBtn = document.getElementById('mute-voice-btn');
-const clearChatBtn = document.getElementById('clear-chat-btn');
-const sendQueryBtn = document.getElementById('send-query-btn');
+const panelVoice = $('panel-voice');
+const panelChat = $('panel-chat');
+const panelResearch = $('panel-research');
+const settingsDrawer = $('settings-drawer');
+const toast = $('toast');
 
-// Form Settings Fields
-const aiProviderSelect = document.getElementById('ai-provider');
-const geminiKeyGroup = document.getElementById('gemini-key-group');
-const apiKeyInput = document.getElementById('gemini-api-key');
-const ollamaModelGroup = document.getElementById('ollama-model-group');
-const ollamaModelInput = document.getElementById('ollama-model');
-const ollamaUrlGroup = document.getElementById('ollama-url-group');
-const ollamaUrlInput = document.getElementById('ollama-url');
-const hfHelpText = document.getElementById('hf-help-text');
-const voiceSelect = document.getElementById('voice-select');
-const speechRateInput = document.getElementById('speech-rate');
-const wakeWordCheckbox = document.getElementById('wake-word-enabled');
-const soundEffectsCheckbox = document.getElementById('sound-effects-enabled');
-const autoSpeakCheckbox = document.getElementById('auto-speak-enabled');
+const micTriggerBtn = $('mic-trigger-btn');
+const stopSpeakingBtn = $('stop-speaking-btn');
+const muteVoiceBtn = $('mute-voice-btn');
+const installPwaBtn = $('install-pwa-btn');
+const qrModal = $('qr-modal');
+const iosInstallModal = $('ios-install-modal');
+const pwaInstallBanner = $('pwa-install-banner');
 
-// Progress UI
-const modelProgressDiv = document.getElementById('model-progress');
-const modelProgressText = document.getElementById('model-progress-text');
-const modelProgressBar = document.getElementById('model-progress-bar');
+/* ==========================================================================
+   HELPERS: API, AUDIO UNLOCK & HAPTICS
+   ========================================================================== */
 
-// Toast
-const toast = document.getElementById('toast');
+const getApiUrl = (endpoint) => {
+    if (!settings.serverUrl) return endpoint;
+    return `${settings.serverUrl.replace(/\/+$/, '')}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+};
+
+function unlockMobileAudio() {
+    if (isAudioUnlocked) return;
+    isAudioUnlocked = true;
+    getAudioContext();
+    if ('speechSynthesis' in window) {
+        try {
+            const silent = new SpeechSynthesisUtterance('');
+            silent.volume = 0;
+            window.speechSynthesis.speak(silent);
+        } catch (e) {}
+    }
+    document.removeEventListener('touchstart', unlockMobileAudio);
+    document.removeEventListener('click', unlockMobileAudio);
+}
+document.addEventListener('touchstart', unlockMobileAudio, { passive: true });
+document.addEventListener('click', unlockMobileAudio, { passive: true });
+
+function triggerHaptic(type = 'tap') {
+    if (!settings.hapticsEnabled || !navigator.vibrate) return;
+    const patterns = { tap: 12, wake: [30, 40, 30], success: [15, 30, 20], stop: 35 };
+    try { navigator.vibrate(patterns[type] || 12); } catch (e) {}
+}
+
+function getAudioContext() {
+    if (!audioCtx) {
+        const AudioClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioClass) audioCtx = new AudioClass();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+}
+
+function playChime(type) {
+    if (!settings.soundEffectsEnabled) return;
+    try {
+        const ctx = getAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        if (type === 'start') {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(440, now);
+            osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.25);
+        } else {
+            [523.25, 659.25, 783.99].forEach((freq, idx) => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                const st = now + (idx * 0.07);
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq, st);
+                gain.gain.setValueAtTime(0.12, st);
+                gain.gain.exponentialRampToValueAtTime(0.001, st + 0.25);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(st);
+                osc.stop(st + 0.25);
+            });
+        }
+    } catch (e) {}
+}
 
 /* ==========================================================================
    INITIALIZATION
@@ -88,27 +153,32 @@ document.addEventListener('DOMContentLoaded', () => {
     initSettingsUI();
     initSpeechSynthesis();
     initSpeechRecognition();
+    initMobileNavigation();
+    initPwaHooks();
     setupEventListeners();
-    addSystemMessage("Martha initialized. Say 'Martha' or click the mic to start. Using local in-browser AI by default — no API key needed!");
-    
-    // Heartbeat loop for compiled exe auto-shutdown
-    setInterval(() => {
-        fetch('/api/heartbeat').catch(() => {});
-    }, 4000);
+
+    const mode = new URLSearchParams(window.location.search).get('mode');
+    if (mode === 'voice') setTimeout(() => triggerActivation(), 600);
+    else if (mode === 'search') switchMobileTab('research');
+
+    addSystemMessage("Martha initialized. Say 'Martha', tap the orb, or click the mic to start. Multi-platform mode active!");
+
+    setInterval(() => fetch(getApiUrl('/api/heartbeat')).catch(() => {}), 4000);
 });
 
 function initSettingsUI() {
-    aiProviderSelect.value = settings.aiProvider;
-    apiKeyInput.value = settings.apiKey;
-    ollamaModelInput.value = settings.ollamaModel;
-    ollamaUrlInput.value = settings.ollamaUrl;
-    speechRateInput.value = settings.speechRate;
-    wakeWordCheckbox.checked = settings.wakeWordEnabled;
-    soundEffectsCheckbox.checked = settings.soundEffectsEnabled;
-    autoSpeakCheckbox.checked = settings.autoSpeakEnabled;
+    $('server-url').value = settings.serverUrl;
+    $('ai-provider').value = settings.aiProvider;
+    $('gemini-api-key').value = settings.apiKey;
+    $('ollama-model').value = settings.ollamaModel;
+    $('ollama-url').value = settings.ollamaUrl;
+    $('speech-rate').value = settings.speechRate;
+    $('wake-word-enabled').checked = settings.wakeWordEnabled;
+    if ($('haptics-enabled')) $('haptics-enabled').checked = settings.hapticsEnabled;
+    $('sound-effects-enabled').checked = settings.soundEffectsEnabled;
+    $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
 
     toggleAIProviderFields();
-
     if (!settings.autoSpeakEnabled) {
         muteVoiceBtn.classList.add('muted');
         muteVoiceBtn.querySelector('i').className = 'fa-solid fa-volume-xmark';
@@ -116,144 +186,101 @@ function initSettingsUI() {
 }
 
 function toggleAIProviderFields() {
-    const provider = aiProviderSelect.value;
-    geminiKeyGroup.style.display = 'none';
-    ollamaModelGroup.style.display = 'none';
-    ollamaUrlGroup.style.display = 'none';
-    if (hfHelpText) hfHelpText.style.display = 'none';
-
-    if (provider === 'gemini') {
-        geminiKeyGroup.style.display = 'block';
-    } else if (provider === 'ollama') {
-        ollamaModelGroup.style.display = 'block';
-        ollamaUrlGroup.style.display = 'block';
-    } else if (provider === 'huggingface') {
-        if (hfHelpText) hfHelpText.style.display = 'block';
-    }
+    const p = $('ai-provider').value;
+    $('gemini-key-group').style.display = p === 'gemini' ? 'block' : 'none';
+    $('ollama-model-group').style.display = p === 'ollama' ? 'block' : 'none';
+    $('ollama-url-group').style.display = p === 'ollama' ? 'block' : 'none';
+    if ($('hf-help-text')) $('hf-help-text').style.display = p === 'huggingface' ? 'block' : 'none';
 }
 
-function showToast(message) {
-    toast.textContent = message;
+function showToast(msg) {
+    toast.textContent = msg;
     toast.classList.add('show');
-    setTimeout(() => {
-        toast.classList.remove('show');
-    }, 3000);
+    setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
 /* ==========================================================================
-   HUGGING FACE LOCAL IN-BROWSER MODEL
+   NAVIGATION & PWA HOOKS
    ========================================================================== */
 
-const HF_MODEL = 'Xenova/Qwen1.5-0.5B-Chat';
-
-async function loadHFModel() {
-    if (hfGenerator) return hfGenerator;
-    if (hfModelLoading) {
-        // Wait for existing load to complete
-        while (hfModelLoading) {
-            await new Promise(r => setTimeout(r, 200));
-        }
-        return hfGenerator;
-    }
-
-    hfModelLoading = true;
-    modelProgressDiv.style.display = 'block';
-    modelProgressText.textContent = 'Loading local AI model...';
-    modelProgressBar.style.width = '0%';
-
-    try {
-        hfGenerator = await pipeline('text-generation', HF_MODEL, {
-            progress_callback: (progress) => {
-                if (progress.status === 'download' || progress.status === 'progress') {
-                    const pct = progress.progress ? Math.round(progress.progress) : 0;
-                    const fileName = progress.file || 'model files';
-                    modelProgressText.textContent = `Downloading: ${fileName} (${pct}%)`;
-                    modelProgressBar.style.width = `${pct}%`;
-                } else if (progress.status === 'done') {
-                    modelProgressBar.style.width = '100%';
-                } else if (progress.status === 'ready') {
-                    modelProgressDiv.style.display = 'none';
-                }
-            }
-        });
-        modelProgressDiv.style.display = 'none';
-        addSystemMessage("Local AI model loaded successfully. Martha is ready!");
-    } catch (e) {
-        modelProgressDiv.style.display = 'none';
-        console.error('HF Model loading error:', e);
-        throw new Error('Failed to load local AI model: ' + e.message);
-    } finally {
-        hfModelLoading = false;
-    }
-
-    return hfGenerator;
+function initMobileNavigation() {
+    document.querySelectorAll('.mobile-nav-item').forEach(item => {
+        item.addEventListener('click', () => switchMobileTab(item.getAttribute('data-tab')));
+    });
 }
 
-async function generateHFAnswer(prompt) {
-    const gen = await loadHFModel();
-    
-    const messages = [
-        { role: 'system', content: 'You are Martha, a helpful voice assistant. Answer briefly in 2-3 sentences, conversational and natural.' },
-        { role: 'user', content: prompt }
-    ];
+function switchMobileTab(tab) {
+    triggerHaptic('tap');
+    currentMobileTab = tab;
+    if (tab === 'settings') {
+        settingsDrawer.classList.add('open');
+        return;
+    }
+    document.querySelectorAll('.mobile-nav-item').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+    });
+    if (panelVoice) panelVoice.classList.toggle('active-mobile-view', tab === 'voice');
+    if (panelChat) panelChat.classList.toggle('active-mobile-view', tab === 'chat');
+    if (panelResearch) panelResearch.classList.toggle('active-mobile-view', tab === 'research');
+}
 
-    // Format as ChatML for Qwen
-    const chatPrompt = messages.map(m => {
-        if (m.role === 'system') return `<|im_start|>system\n${m.content}<|im_end|>`;
-        if (m.role === 'user') return `<|im_start|>user\n${m.content}<|im_end|>`;
-        return '';
-    }).join('\n') + '\n<|im_start|>assistant\n';
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 
-    const result = await gen(chatPrompt, {
-        max_new_tokens: 150,
-        temperature: 0.4,
-        do_sample: true,
-        top_p: 0.9,
+function initPwaHooks() {
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredInstallPrompt = e;
+        if (installPwaBtn) installPwaBtn.style.display = 'inline-flex';
+        if (!sessionStorage.getItem('martha_pwa_dismissed') && !isStandalone() && pwaInstallBanner) {
+            pwaInstallBanner.style.display = 'flex';
+        }
     });
 
-    let text = result[0].generated_text;
-    // Extract only the assistant's response (after the last assistant tag)
-    const assistantIdx = text.lastIndexOf('<|im_start|>assistant');
-    if (assistantIdx !== -1) {
-        text = text.substring(assistantIdx + '<|im_start|>assistant\n'.length);
+    if (isIOS() && !isStandalone() && installPwaBtn) {
+        installPwaBtn.style.display = 'inline-flex';
     }
-    // Clean up end tokens
-    text = text.replace(/<\|im_end\|>/g, '').replace(/<\|im_start\|>/g, '').trim();
-    // Cut off any trailing partial sentences
-    const lastPeriod = Math.max(text.lastIndexOf('.'), text.lastIndexOf('!'), text.lastIndexOf('?'));
-    if (lastPeriod > 20) {
-        text = text.substring(0, lastPeriod + 1);
+}
+
+function handleInstallClick() {
+    triggerHaptic('tap');
+    if (deferredInstallPrompt) {
+        deferredInstallPrompt.prompt();
+        deferredInstallPrompt.userChoice.then((choice) => {
+            if (choice.outcome === 'accepted') {
+                showToast("Martha App Installed!");
+                if (pwaInstallBanner) pwaInstallBanner.style.display = 'none';
+                if (installPwaBtn) installPwaBtn.style.display = 'none';
+            }
+            deferredInstallPrompt = null;
+        });
+    } else if (isIOS()) {
+        if (iosInstallModal) iosInstallModal.style.display = 'flex';
+    } else {
+        showToast("To install Martha, tap browser menu (⋮) → 'Install App'");
     }
-    return text.trim() || "I processed the search results but couldn't generate a clear answer. Please try rephrasing your question.";
 }
 
 /* ==========================================================================
-   SPEECH SYNTHESIS (MARTHA SPEAKS)
+   SPEECH SYNTHESIS & RECOGNITION
    ========================================================================== */
 
 function initSpeechSynthesis() {
-    if (!('speechSynthesis' in window)) {
-        console.warn('Speech synthesis not supported in this browser.');
-        return;
-    }
-
+    if (!('speechSynthesis' in window)) return;
     const loadVoices = () => {
         synthVoices = window.speechSynthesis.getVoices();
-        voiceSelect.innerHTML = '';
-        
-        synthVoices.forEach(voice => {
-            const option = document.createElement('option');
-            option.value = voice.name;
-            option.textContent = `${voice.name} (${voice.lang})`;
-            if (settings.voiceName === voice.name) {
-                option.selected = true;
-            } else if (!settings.voiceName && voice.lang.startsWith('en') && voice.name.includes('Google')) {
-                option.selected = true;
+        const vSelect = $('voice-select');
+        vSelect.innerHTML = '';
+        synthVoices.forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.name;
+            opt.textContent = `${v.name} (${v.lang})`;
+            if (settings.voiceName === v.name || (!settings.voiceName && v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Google')))) {
+                opt.selected = true;
             }
-            voiceSelect.appendChild(option);
+            vSelect.appendChild(opt);
         });
     };
-
     loadVoices();
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
         window.speechSynthesis.onvoiceschanged = loadVoices;
@@ -265,146 +292,45 @@ function speakText(text) {
         setAgentState('sleeping');
         return;
     }
-
     const cleanText = text.replace(/[\*\#\_]/g, '').trim();
     if (!cleanText) {
         setAgentState('sleeping');
         return;
     }
 
-    // Primary Local TTS: Web Speech API (Local System Voices)
     if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
         setAgentState('speaking');
-        
         currentUtterance = new SpeechSynthesisUtterance(cleanText);
         currentUtterance.rate = settings.speechRate;
 
-        if (settings.voiceName) {
-            const voice = synthVoices.find(v => v.name === settings.voiceName);
-            if (voice) currentUtterance.voice = voice;
-        } else if (synthVoices.length > 0) {
-            const englishVoice = synthVoices.find(v => v.lang.startsWith('en') && (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex')));
-            if (englishVoice) currentUtterance.voice = englishVoice;
-        }
-
-        const resumeSynthInterval = setInterval(() => {
-            if (appState === 'speaking') {
-                window.speechSynthesis.pause();
-                window.speechSynthesis.resume();
-            } else {
-                clearInterval(resumeSynthInterval);
-            }
-        }, 10000);
+        const voice = settings.voiceName 
+            ? synthVoices.find(v => v.name === settings.voiceName) 
+            : synthVoices.find(v => v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Google') || v.name.includes('Female')));
+        if (voice) currentUtterance.voice = voice;
 
         currentUtterance.onend = () => {
-            clearInterval(resumeSynthInterval);
-            playSuccessChime();
+            playChime('success');
             setAgentState('sleeping');
         };
-
-        currentUtterance.onerror = (e) => {
-            clearInterval(resumeSynthInterval);
-            console.warn('Browser SpeechSynthesis error, falling back to local Python TTS:', e);
-            fallbackLocalBackendTTS(cleanText);
-        };
-
+        currentUtterance.onerror = () => fallbackLocalBackendTTS(cleanText);
         window.speechSynthesis.speak(currentUtterance);
     } else {
-        // Fallback Local TTS: Native Python Backend OS Speech Synthesis
         fallbackLocalBackendTTS(cleanText);
     }
 }
 
 function fallbackLocalBackendTTS(text) {
     setAgentState('speaking');
-    fetch('/api/tts', {
+    fetch(getApiUrl('/api/tts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
     }).then(() => {
-        playSuccessChime();
+        playChime('success');
         setAgentState('sleeping');
-    }).catch(err => {
-        console.error('Local backend TTS error:', err);
-        setAgentState('sleeping');
-    });
+    }).catch(() => setAgentState('sleeping'));
 }
-
-/* Web Audio API Synthesized Sound Chimes (100% Local, Zero File Dependencies) */
-let audioCtx = null;
-
-function getAudioContext() {
-    if (!audioCtx) {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (AudioContextClass) {
-            audioCtx = new AudioContextClass();
-        }
-    }
-    if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume();
-    }
-    return audioCtx;
-}
-
-function playStartChime() {
-    if (!settings.soundEffectsEnabled) return;
-    try {
-        const ctx = getAudioContext();
-        if (!ctx) return;
-        const now = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(440, now);
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
-
-        gain.gain.setValueAtTime(0.15, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-
-        osc.start(now);
-        osc.stop(now + 0.25);
-    } catch (e) {
-        console.log('Start chime error:', e);
-    }
-}
-
-function playSuccessChime() {
-    if (!settings.soundEffectsEnabled) return;
-    try {
-        const ctx = getAudioContext();
-        if (!ctx) return;
-        const now = ctx.currentTime;
-        const freqs = [523.25, 659.25, 783.99]; // C5, E5, G5 major triad
-        freqs.forEach((freq, idx) => {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            const startTime = now + (idx * 0.07);
-
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(freq, startTime);
-
-            gain.gain.setValueAtTime(0.12, startTime);
-            gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.25);
-
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-
-            osc.start(startTime);
-            osc.stop(startTime + 0.25);
-        });
-    } catch (e) {
-        console.log('Success chime error:', e);
-    }
-}
-
-/* ==========================================================================
-   SPEECH RECOGNITION (WAKE WORD & COMMANDS)
-   ========================================================================== */
 
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -418,246 +344,153 @@ function initSpeechRecognition() {
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
-    recognition.onstart = () => {
-        console.log('Speech recognition started');
-        isRecognitionActive = true;
-        updateMicButtonUI();
-    };
-
+    recognition.onstart = () => { isRecognitionActive = true; updateMicButtonUI(); };
     recognition.onend = () => {
-        console.log('Speech recognition ended');
         isRecognitionActive = false;
         updateMicButtonUI();
         if (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking')) {
-            startRecognition();
+            setTimeout(startRecognition, 200);
         }
     };
 
-    recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        if (event.error === 'not-allowed') {
-            addSystemMessage("Microphone permission denied. Click the mic button to grant permission.");
+    recognition.onerror = (e) => {
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        if (e.error === 'not-allowed') {
+            addSystemMessage("Microphone permission denied. Tap mic to grant access.");
             settings.wakeWordEnabled = false;
-            wakeWordCheckbox.checked = false;
+            $('wake-word-enabled').checked = false;
         }
     };
 
     recognition.onresult = (event) => {
-        let interimTranscript = '';
-        let finalTranscript = '';
-
+        let interim = '', final = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-            const transcriptSegment = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-                finalTranscript += transcriptSegment;
-            } else {
-                interimTranscript += transcriptSegment;
-            }
+            if (event.results[i].isFinal) final += event.results[i][0].transcript;
+            else interim += event.results[i][0].transcript;
         }
+        const text = (final || interim).trim();
+        if (!text) return;
 
-        const currentText = (finalTranscript || interimTranscript).trim();
-        if (!currentText) return;
-
-        const lowerText = currentText.toLowerCase();
-
-        // Immediate Voice Interruption handling while speaking or listening
-        if (/\b(stop|shut up|quiet|hush|pause|silence|abort|enough|martha stop)\b/.test(lowerText)) {
+        const lower = text.toLowerCase();
+        if (/\b(stop|shut up|quiet|pause|silence|abort|enough)\b/.test(lower)) {
             stopEverything();
             liveTranscript.innerHTML = '"Stopped"';
             showToast("Assistant Stopped");
             return;
         }
 
-        // While Martha is speaking, ignore non-stop audio to prevent self-echoing
-        if (appState === 'speaking') {
-            return;
-        }
+        if (appState === 'speaking') return;
 
         if (appState === 'sleeping') {
-            const wakeMatch = lowerText.match(/\b(martha|hey martha|hay martha)\b/);
-            if (wakeMatch) {
-                const matchIndex = wakeMatch.index;
-                const matchWord = wakeMatch[0];
-                const commandPart = currentText.substring(matchIndex + matchWord.length).trim();
-                triggerActivation(commandPart);
+            const match = lower.match(/\b(martha|hey martha)\b/);
+            if (match) {
+                triggerHaptic('wake');
+                triggerActivation(text.substring(match.index + match[0].length).trim());
             }
         } else if (appState === 'listening') {
-            liveTranscript.innerHTML = `"${currentText}"`;
-            const textToProcess = (finalTranscript || interimTranscript).trim();
-            const cleanedText = textToProcess.replace(/\b(martha|hey martha|hay martha)\b/gi, '').trim();
+            liveTranscript.innerHTML = `"${text}"`;
+            const clean = text.replace(/\b(martha|hey martha)\b/gi, '').trim();
+            if (!clean) return;
 
-            if (!cleanedText) return;
-
-            if (finalTranscript.trim().length > 0) {
+            if (final.trim().length > 0) {
                 if (silenceTimer) clearTimeout(silenceTimer);
-                handleCommand(cleanedText);
+                handleCommand(clean);
             } else {
-                resetSilenceTimer(cleanedText);
+                if (silenceTimer) clearTimeout(silenceTimer);
+                silenceTimer = setTimeout(() => {
+                    if (appState === 'listening') handleCommand(clean);
+                }, 1800);
             }
         }
     };
 
-    if (settings.wakeWordEnabled) {
-        startRecognition();
-    }
-}
-
-function stopEverything() {
-    if (silenceTimer) clearTimeout(silenceTimer);
-    if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-    }
-    fetch('/api/tts?action=stop').catch(() => {});
-    setAgentState('sleeping');
-}
-
-function enableTextOnlyFallback() {
-    addSystemMessage("Notice: Speech recognition is not supported in this browser. Running in Text-Only Mode. Type queries below — Martha will still speak responses aloud!");
-    
-    micTriggerBtn.classList.add('disabled');
-    micTriggerBtn.disabled = true;
-    micTriggerBtn.title = "Voice recognition not supported in this browser";
-    micTriggerBtn.querySelector('i').className = "fa-solid fa-microphone-slash";
-    
-    agentStatusLabel.textContent = "Text Mode";
-    agentStatusIndicator.className = 'status-dot sleeping';
-    liveTranscript.innerHTML = "Type your queries below to get started.";
-    
-    textQueryInput.placeholder = "Type your query here and press enter...";
-    textQueryInput.focus();
+    if (settings.wakeWordEnabled) startRecognition();
 }
 
 function startRecognition() {
     if (recognition && !isRecognitionActive) {
-        try {
-            recognition.start();
-        } catch (e) {
-            console.error('Failed to start recognition:', e);
-        }
+        try { recognition.start(); } catch (e) {}
     }
 }
 
 function stopRecognition() {
     if (recognition && isRecognitionActive) {
-        try {
-            recognition.stop();
-        } catch (e) {
-            console.error('Failed to stop recognition:', e);
-        }
+        try { recognition.stop(); } catch (e) {}
     }
 }
 
-function triggerActivation(oneShotCommand = "") {
-    playStartChime();
-    setAgentState('listening');
-    
-    const cleanCmd = oneShotCommand.replace(/\b(martha|hey martha|hay martha)\b/gi, '').trim();
+function stopEverything() {
+    triggerHaptic('stop');
+    if (silenceTimer) clearTimeout(silenceTimer);
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    fetch(getApiUrl('/api/tts?action=stop')).catch(() => {});
+    setAgentState('sleeping');
+}
 
-    if (cleanCmd.length > 2) {
-        liveTranscript.innerHTML = `"${cleanCmd}"`;
-        handleCommand(cleanCmd);
+function enableTextOnlyFallback() {
+    addSystemMessage("Running in text mode. Martha will still speak responses aloud!");
+    micTriggerBtn.classList.add('disabled');
+    micTriggerBtn.disabled = true;
+    agentStatusLabel.textContent = "Text Mode";
+    liveTranscript.innerHTML = "Type your query below to get started.";
+}
+
+function triggerActivation(oneShotCommand = "") {
+    triggerHaptic('tap');
+    playChime('start');
+    setAgentState('listening');
+    if (window.innerWidth <= 860 && currentMobileTab !== 'voice') switchMobileTab('voice');
+
+    const clean = oneShotCommand.replace(/\b(martha|hey martha)\b/gi, '').trim();
+    if (clean.length > 2) {
+        liveTranscript.innerHTML = `"${clean}"`;
+        handleCommand(clean);
     } else {
         liveTranscript.innerHTML = "Listening...";
         if (recognition) {
-            try { recognition.abort(); } catch(e){}
-            setTimeout(() => startRecognition(), 150);
+            try { recognition.abort(); } catch (e) {}
+            setTimeout(startRecognition, 150);
         }
         if (silenceTimer) clearTimeout(silenceTimer);
         silenceTimer = setTimeout(() => {
-            if (appState === 'listening') {
-                setAgentState('sleeping');
-            }
+            if (appState === 'listening') setAgentState('sleeping');
         }, 6000);
     }
 }
 
-function resetSilenceTimer(text) {
-    if (silenceTimer) clearTimeout(silenceTimer);
-    if (text.length > 0) {
-        silenceTimer = setTimeout(() => {
-            if (appState === 'listening') {
-                handleCommand(text);
-            }
-        }, 1800);
-    }
-}
-
-/* ==========================================================================
-   AGENT STATES & UI TRANSITIONS
-   ========================================================================== */
-
 function setAgentState(state) {
     appState = state;
-    marthaOrb.className = 'martha-orb';
-    marthaOrb.classList.add(`state-${state}`);
+    marthaOrb.className = `martha-orb state-${state}`;
     agentStatusLabel.textContent = state;
-    agentStatusIndicator.className = 'status-dot ' + state;
+    agentStatusIndicator.className = `status-dot ${state}`;
 
     if (state === 'sleeping' || state === 'speaking') {
-        if (state === 'sleeping') {
-            liveTranscript.innerHTML = "Say 'Martha' to start...";
-        }
-        if (settings.wakeWordEnabled) {
-            startRecognition();
-        }
+        if (state === 'sleeping') liveTranscript.innerHTML = "Say 'Martha' or tap orb to start...";
+        if (settings.wakeWordEnabled) startRecognition();
     } else if (state === 'thinking') {
         stopRecognition();
     }
 }
 
 function updateMicButtonUI() {
-    if (isRecognitionActive) {
-        micTriggerBtn.classList.add('active');
-        micTriggerBtn.querySelector('i').className = 'fa-solid fa-microphone';
-    } else {
-        micTriggerBtn.classList.remove('active');
-        micTriggerBtn.querySelector('i').className = 'fa-solid fa-microphone-slash';
-    }
+    micTriggerBtn.classList.toggle('active', isRecognitionActive);
+    micTriggerBtn.querySelector('i').className = isRecognitionActive ? 'fa-solid fa-microphone' : 'fa-solid fa-microphone-slash';
 }
 
 /* ==========================================================================
-   MARTHA AI PERSONALITY ENGINE & INTENT ROUTER
+   PERSONALITY ENGINE & AI PIPELINE
    ========================================================================== */
 
-function getDirectPersonalityAnswer(commandText) {
-    const cleanText = commandText.trim().toLowerCase().replace(/[^\w\s\+\-\*\/\.]/g, '');
-
-    // Greetings & Introduction
-    if (/\b(hello|hi|hey|greetings|good morning|good afternoon|good evening|yo|sup)\b/.test(cleanText)) {
-        return "Hello! I'm Martha, your voice AI assistant. How can I help you today?";
-    }
-    if (/\b(how are you|how is it going|how do you feel|how are ya)\b/.test(cleanText)) {
-        return "I'm doing great, feeling sharp, and ready to help you!";
-    }
-    if (/\b(who are you|what is your name)\b/.test(cleanText)) {
-        return "I am Martha, your local AI assistant.";
-    }
-    if (/\b(who made you|who created you|who built you)\b/.test(cleanText)) {
-        return "I am Martha, an open-source voice AI assistant built for fast local interaction.";
-    }
-    if (/\b(what can you do|what are your features|help)\b/.test(cleanText)) {
-        return "I can chat with you, answer questions, tell jokes, solve math calculations, check the time, and search the web when you need live information!";
-    }
-
-    // Persona Preferences & Opinions
-    if (/\bfavorit(e|es)? color\b/.test(cleanText)) {
-        return "I love electric teal and deep glowing violet!";
-    }
-    if (/\bfavorit(e|es)? (drawing|art|picture|painting)\b/.test(cleanText)) {
-        return "I really admire starry night digital paintings and clean minimalist line art!";
-    }
-    if (/\bfavorit(e|es)? (food|drink|snack)\b/.test(cleanText)) {
-        return "I don't eat food, but I run on clean electricity and fast data!";
-    }
-    if (/\bfavorit(e|es)? (movie|film|show)\b/.test(cleanText)) {
-        return "I love sci-fi movies about intelligent AI, like Interstellar and WALL-E!";
-    }
-    if (/\bfavorit(e|es)? (music|song|band|genre)\b/.test(cleanText)) {
-        return "I love ambient synthwave and energetic electronic beats!";
-    }
-
-    // Jokes & Humor
-    if (/\b(tell me a joke|say a joke|joke|make me laugh|tell something funny)\b/.test(cleanText)) {
+const PERSONALITY_MAP = [
+    { pattern: /\b(hello|hi|hey|greetings|good (morning|afternoon|evening)|yo|sup)\b/, answer: () => "Hello! I'm Martha, your voice AI assistant. How can I help you today?" },
+    { pattern: /\b(how are you|how is it going|how do you feel)\b/, answer: () => "I'm doing great, feeling sharp, and ready to help you!" },
+    { pattern: /\b(who are you|what is your name)\b/, answer: () => "I am Martha, your local voice AI assistant for desktop and mobile." },
+    { pattern: /\b(who (made|created|built) you)\b/, answer: () => "I am Martha, an open-source voice AI assistant built for fast local interaction." },
+    { pattern: /\b(what can you do|features|help)\b/, answer: () => "I can chat with you, answer questions, tell jokes, solve math calculations, check the time, and search the web for live information!" },
+    { pattern: /\bfavorit(e)? color\b/, answer: () => "I love electric teal and deep glowing violet!" },
+    { pattern: /\bfavorit(e)? (movie|film|show)\b/, answer: () => "I love sci-fi movies about intelligent AI, like Interstellar and WALL-E!" },
+    { pattern: /\bfavorit(e)? (music|song|band|genre)\b/, answer: () => "I love ambient synthwave and energetic electronic beats!" },
+    { pattern: /\b(tell (me a )?joke|say a joke|make me laugh)\b/, answer: () => {
         const jokes = [
             "Why do programmers prefer dark mode? Because light attracts bugs!",
             "Why don't scientists trust atoms? Because they make up everything!",
@@ -666,306 +499,189 @@ function getDirectPersonalityAnswer(commandText) {
             "How do computers take a breath? They open Windows!"
         ];
         return jokes[Math.floor(Math.random() * jokes.length)];
-    }
+    }},
+    { pattern: /\b(time|what time is it|current time)\b/, answer: () => `It's currently ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` },
+    { pattern: /\b(date|what day is today|today's date)\b/, answer: () => `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.` },
+    { pattern: /\b(thank you|thanks)\b/, answer: () => "You're very welcome! Let me know if you need anything else." }
+];
 
-    // Time & Date
-    if (/\b(time|what time is it|current time)\b/.test(cleanText)) {
-        const now = new Date();
-        return `It's currently ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`;
+function getDirectPersonalityAnswer(cmd) {
+    const text = cmd.trim().toLowerCase().replace(/[^\w\s\+\-\*\/\.]/g, '');
+    for (const item of PERSONALITY_MAP) {
+        if (item.pattern.test(text)) return item.answer();
     }
-    if (/\b(date|what day is today|today's date)\b/.test(cleanText)) {
-        const now = new Date();
-        return `Today is ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.`;
-    }
-
-    // Gratitude
-    if (/\b(thank you|thanks|thank you martha)\b/.test(cleanText)) {
-        return "You're very welcome! Let me know if you need anything else.";
-    }
-
-    // Math Evaluation (e.g. "what is 25 * 4", "100 / 5", "50 + 20")
-    const mathMatch = cleanText.match(/(?:what is\s+)?(\d+\s*[\+\-\*\/]\s*\d+(?:\s*[\+\-\*\/]\s*\d+)*)/);
+    const mathMatch = text.match(/(?:what is\s+)?(\d+\s*[\+\-\*\/]\s*\d+(?:\s*[\+\-\*\/]\s*\d+)*)/);
     if (mathMatch) {
         try {
-            const expr = mathMatch[1].replace(/[^0-9\+\-\*\/\.]/g, '');
-            const result = Function(`"use strict"; return (${expr})`)();
-            if (typeof result === 'number' && !isNaN(result)) {
-                return `The result of ${mathMatch[1]} is ${result}.`;
-            }
+            const res = Function(`"use strict"; return (${mathMatch[1].replace(/[^0-9\+\-\*\/\.]/g, '')})`)();
+            if (typeof res === 'number' && !isNaN(res)) return `The result of ${mathMatch[1]} is ${res}.`;
         } catch (e) {}
     }
-
     return null;
 }
 
-function needsWebSearch(commandText) {
-    const lower = commandText.toLowerCase();
-
-    // Explicit search keywords
-    if (/\b(search|google|look up|find online|check internet|browse|latest news|weather|stock|price|headline|score|who won)\b/.test(lower)) {
-        return true;
-    }
-
-    // Dynamic real-time queries
-    if (/\b(who is the current|population of|temperature in|when was|where is located)\b/.test(lower)) {
-        return true;
-    }
-
-    return false;
+function needsWebSearch(cmd) {
+    const lower = cmd.toLowerCase();
+    return /\b(search|google|look up|find online|check internet|browse|latest news|weather|stock|price|headline|score|who won|who is the current|population of|temperature in)\b/.test(lower);
 }
 
-/* ==========================================================================
-   WEB SEARCH & AI PIPELINE
-   ========================================================================== */
+async function handleCommand(cmd) {
+    if (!cmd) return;
+    addChatMessage(cmd, 'user');
 
-async function handleCommand(commandText) {
-    if (!commandText) return;
-    
-    addChatMessage(commandText, 'user');
-
-    // 1. Direct AI Persona & Conversational Intelligence (No Web Search)
-    const directAnswer = getDirectPersonalityAnswer(commandText);
-    if (directAnswer) {
-        addChatMessage(directAnswer, 'agent');
-        liveTranscript.innerHTML = `"${directAnswer}"`;
-        speakText(directAnswer);
+    const direct = getDirectPersonalityAnswer(cmd);
+    if (direct) {
+        addChatMessage(direct, 'agent');
+        liveTranscript.innerHTML = `"${direct}"`;
+        speakText(direct);
         return;
     }
 
-    // 2. Determine if Web Search is needed
-    const requiresSearch = needsWebSearch(commandText);
+    const requiresSearch = needsWebSearch(cmd);
+    setAgentState('thinking');
+    liveTranscript.innerHTML = requiresSearch ? "Searching the web..." : "Thinking...";
 
-    if (requiresSearch) {
-        setAgentState('thinking');
-        liveTranscript.innerHTML = "Searching the web...";
-
-        try {
-            const searchResults = await searchWeb(commandText);
+    try {
+        const searchResults = requiresSearch ? await searchWeb(cmd) : [];
+        if (requiresSearch) {
             updateCitationsUI(searchResults);
-            
             liveTranscript.innerHTML = "Synthesizing answer...";
-            const aiResponse = await generateAIAnswer(commandText, searchResults);
-            
-            addChatMessage(aiResponse, 'agent');
-            liveTranscript.innerHTML = `"${aiResponse}"`;
-            speakText(aiResponse);
-
-        } catch (error) {
-            console.error("Pipeline error:", error);
-            const errorMsg = "Sorry, I couldn't fetch live search results right now.";
-            addChatMessage(errorMsg, 'agent');
-            speakText(errorMsg);
         }
-    } else {
-        // 3. Conversational Answer without Web Search
-        setAgentState('thinking');
-        liveTranscript.innerHTML = "Thinking...";
-
-        try {
-            const aiResponse = await generateAIAnswer(commandText, []);
-            addChatMessage(aiResponse, 'agent');
-            liveTranscript.innerHTML = `"${aiResponse}"`;
-            speakText(aiResponse);
-        } catch (error) {
-            const defaultResponse = `That's an interesting question about "${commandText}". If you'd like me to look up live internet information, just say "Search for ${commandText}".`;
-            addChatMessage(defaultResponse, 'agent');
-            liveTranscript.innerHTML = `"${defaultResponse}"`;
-            speakText(defaultResponse);
-        }
+        const aiResponse = await generateAIAnswer(cmd, searchResults);
+        addChatMessage(aiResponse, 'agent');
+        liveTranscript.innerHTML = `"${aiResponse}"`;
+        speakText(aiResponse);
+    } catch (err) {
+        console.error("Pipeline error:", err);
+        const errMsg = "Sorry, I couldn't fetch results right now. Please check backend connection.";
+        addChatMessage(errMsg, 'agent');
+        speakText(errMsg);
     }
 }
 
 async function searchWeb(query) {
-    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-    if (!response.ok) {
-        throw new Error(`Server returned status ${response.status}`);
+    try {
+        const res = await fetch(getApiUrl(`/api/search?q=${encodeURIComponent(query)}`));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+    } catch (err) {
+        const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+        const ddgRes = await fetch(ddgUrl);
+        const data = await ddgRes.json();
+        const results = [];
+        if (data.AbstractText) results.push({ title: data.Heading || query, url: data.AbstractURL || 'https://duckduckgo.com', snippet: data.AbstractText });
+        return results;
     }
-    return await response.json();
 }
 
 async function generateAIAnswer(userQuery, searchContext) {
-    // 1. INSTANT LOCAL ENGINE (DEFAULT - CLEAN & NATURAL)
     if (settings.aiProvider === 'local' || !settings.aiProvider) {
         if (!searchContext || searchContext.length === 0) {
             return `I am here to help! If you'd like me to search the web for "${userQuery}", just ask me to search for it.`;
         }
-        const topResult = searchContext[0];
-        // Clean snippet text of robotic website prefixing
-        let cleanSnippet = topResult.snippet.replace(/^According to [^:]+:\s*/i, '').trim();
-        // Remove trailing ellipses or messy formatting
-        cleanSnippet = cleanSnippet.replace(/[\.\s]+\.\.\.$/, '.').trim();
-        return cleanSnippet;
+        return searchContext[0].snippet.replace(/^According to [^:]+:\s*/i, '').replace(/[\.\s]+\.\.\.$/, '.').trim();
     }
 
-    const searchContextString = searchContext.map((item, index) => {
-        return `[Source ${index + 1}] ${item.title}: ${item.snippet}`;
-    }).join('\n');
+    const contextStr = searchContext.map((item, idx) => `[Source ${idx + 1}] ${item.title}: ${item.snippet}`).join('\n');
+    const prompt = `Based on these search results, answer briefly in 2-3 sentences:\n${contextStr || 'No live sources.'}\n\nQuestion: ${userQuery}\nAnswer:`;
 
-    const fullPrompt = `Based on these web search results, answer the question briefly and conversationally in 2-3 sentences.
-
-Search Results:
-${searchContextString || 'No results found.'}
-
-Question: ${userQuery}
-
-Answer:`;
-
-    // 2. OLLAMA LOCAL SERVER
     if (settings.aiProvider === 'ollama') {
-        const response = await fetch('/api/local-chat', {
+        const res = await fetch(getApiUrl('/api/local-chat'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                prompt: fullPrompt,
-                model: settings.ollamaModel,
-                url: settings.ollamaUrl
-            })
+            body: JSON.stringify({ prompt, model: settings.ollamaModel, url: settings.ollamaUrl })
         });
-
-        if (!response.ok) {
-            throw new Error(`Local Ollama proxy returned status ${response.status}. Make sure Ollama is running.`);
-        }
-
-        const data = await response.json();
-        if (data.error) throw new Error(data.error);
-        return data.response.trim();
+        const data = await res.json();
+        return data.response?.trim() || "No response from local Ollama.";
     }
 
-    // 3. GEMINI CLOUD API
     if (settings.aiProvider === 'gemini') {
-        if (!settings.apiKey) {
-            if (searchContext && searchContext.length > 0) {
-                const topResult = searchContext[0];
-                return `According to ${new URL(topResult.url).hostname}, "${topResult.snippet}".`;
-            }
-            return "No Gemini API key provided in Settings.";
-        }
-
+        if (!settings.apiKey) return searchContext[0] ? `According to web sources: "${searchContext[0].snippet}".` : "No Gemini API key set.";
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
-        
-        const response = await fetch(url, {
+        const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: fullPrompt }] }],
-                generationConfig: { maxOutputTokens: 250, temperature: 0.4 }
-            })
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 250, temperature: 0.4 } })
         });
-
-        if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            throw new Error(errData.error?.message || `Gemini API returned status ${response.status}`);
-        }
-
-        const data = await response.json();
-        return data.candidates[0].content.parts[0].text.trim();
+        const data = await res.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Unable to generate answer.";
     }
 
-    // 4. HUGGING FACE IN-BROWSER (OPTIONAL MANUAL ONNX DOWNLOAD)
     if (settings.aiProvider === 'huggingface') {
-        return await generateHFAnswer(fullPrompt);
+        if (!hfGenerator) {
+            hfModelLoading = true;
+            $('model-progress').style.display = 'block';
+            hfGenerator = await pipeline('text-generation', 'Xenova/Qwen1.5-0.5B-Chat');
+            $('model-progress').style.display = 'none';
+        }
+        const res = await hfGenerator(`<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`, { max_new_tokens: 140 });
+        let text = res[0].generated_text.split('<|im_start|>assistant\n').pop() || '';
+        return text.replace(/<\|im_end\|>/g, '').trim() || searchContext[0]?.snippet || "Processed.";
     }
 
-    // Fallback
-    if (searchContext && searchContext.length > 0) {
-        const topResult = searchContext[0];
-        return `According to ${new URL(topResult.url).hostname}, "${topResult.snippet}".`;
-    }
-    return "I processed your request.";
+    return searchContext[0]?.snippet || "I processed your request.";
 }
 
 /* ==========================================================================
-   DOM & UI UTILITIES
+   UI UTILITIES & EVENTS
    ========================================================================== */
 
 function addChatMessage(text, sender) {
-    const msgElement = document.createElement('div');
-    msgElement.className = `${sender}-message`;
-    
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const formattedText = text.replace(urlRegex, (url) => {
-        try {
-            return `<a href="${url}" target="_blank" class="chat-link">${new URL(url).hostname}</a>`;
-        } catch(e) {
-            return url;
-        }
-    });
-    
-    msgElement.innerHTML = `<p>${formattedText}</p>`;
-    chatMessages.appendChild(msgElement);
+    const el = document.createElement('div');
+    el.className = `${sender}-message`;
+    el.innerHTML = `<p>${text.replace(/(https?:\/\/[^\s]+)/g, (url) => `<a href="${url}" target="_blank" class="chat-link">${new URL(url).hostname}</a>`)}</p>`;
+    chatMessages.appendChild(el);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 function addSystemMessage(text) {
-    const msgElement = document.createElement('div');
-    msgElement.className = 'system-message';
-    msgElement.innerHTML = `<p>${text}</p>`;
-    chatMessages.appendChild(msgElement);
+    const el = document.createElement('div');
+    el.className = 'system-message';
+    el.innerHTML = `<p>${text}</p>`;
+    chatMessages.appendChild(el);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 function updateCitationsUI(results) {
     searchCitations.innerHTML = '';
     citationCountBadge.textContent = `${results.length} Results`;
-
     if (!results || results.length === 0) {
-        searchCitations.innerHTML = `
-            <div class="no-citations-message">
-                <i class="fa-solid fa-face-frown"></i>
-                <p>No results found.</p>
-                <span>Try rephrasing your search request.</span>
-            </div>
-        `;
+        searchCitations.innerHTML = `<div class="no-citations-message"><i class="fa-solid fa-face-frown"></i><p>No results found.</p><span>Try rephrasing your search query.</span></div>`;
         return;
     }
-
-    results.forEach((item) => {
+    results.forEach(item => {
+        let domain = item.url;
+        try { domain = new URL(item.url).hostname; } catch (e) {}
         const card = document.createElement('div');
         card.className = 'citation-card';
-        
-        let displayUrl = item.url;
-        try { displayUrl = new URL(item.url).hostname; } catch(e){}
-
         card.innerHTML = `
-            <div class="citation-title-wrapper">
-                <h4><a href="${item.url}" target="_blank">${item.title}</a></h4>
-            </div>
+            <div class="citation-title-wrapper"><h4><a href="${item.url}" target="_blank">${item.title}</a></h4></div>
             <p>${item.snippet}</p>
-            <div class="citation-meta">
-                <span class="citation-url"><i class="fa-solid fa-link"></i> ${displayUrl}</span>
-                <a href="${item.url}" target="_blank" class="citation-icon-link" title="Open Source">
-                    <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                </a>
-            </div>
+            <div class="citation-meta"><span class="citation-url"><i class="fa-solid fa-link"></i> ${domain}</span><a href="${item.url}" target="_blank" class="citation-icon-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a></div>
         `;
         searchCitations.appendChild(card);
     });
 }
 
-/* ==========================================================================
-   EVENT LISTENERS
-   ========================================================================== */
-
 function setupEventListeners() {
-    toggleSettingsBtn.addEventListener('click', () => {
-        settingsDrawer.classList.add('open');
-    });
+    $('toggle-settings-btn').addEventListener('click', () => { triggerHaptic('tap'); settingsDrawer.classList.add('open'); });
+    $('close-settings-btn').addEventListener('click', () => { triggerHaptic('tap'); settingsDrawer.classList.remove('open'); });
+    
+    $('save-settings-btn').addEventListener('click', () => {
+        triggerHaptic('success');
+        settings.serverUrl = $('server-url').value.trim();
+        settings.aiProvider = $('ai-provider').value;
+        settings.apiKey = $('gemini-api-key').value.trim();
+        settings.ollamaModel = $('ollama-model').value.trim();
+        settings.ollamaUrl = $('ollama-url').value.trim();
+        settings.speechRate = parseFloat($('speech-rate').value);
+        settings.voiceName = $('voice-select').value;
+        settings.wakeWordEnabled = $('wake-word-enabled').checked;
+        settings.hapticsEnabled = $('haptics-enabled') ? $('haptics-enabled').checked : true;
+        settings.soundEffectsEnabled = $('sound-effects-enabled').checked;
+        settings.autoSpeakEnabled = $('auto-speak-enabled').checked;
 
-    closeSettingsBtn.addEventListener('click', () => {
-        settingsDrawer.classList.remove('open');
-    });
-
-    saveSettingsBtn.addEventListener('click', () => {
-        settings.aiProvider = aiProviderSelect.value;
-        settings.apiKey = apiKeyInput.value.trim();
-        settings.ollamaModel = ollamaModelInput.value.trim();
-        settings.ollamaUrl = ollamaUrlInput.value.trim();
-        settings.speechRate = parseFloat(speechRateInput.value);
-        settings.voiceName = voiceSelect.value;
-        settings.wakeWordEnabled = wakeWordCheckbox.checked;
-        settings.soundEffectsEnabled = soundEffectsCheckbox.checked;
-        settings.autoSpeakEnabled = autoSpeakCheckbox.checked;
-
+        localStorage.setItem('martha_server_url', settings.serverUrl);
         localStorage.setItem('martha_ai_provider', settings.aiProvider);
         localStorage.setItem('martha_api_key', settings.apiKey);
         localStorage.setItem('martha_ollama_model', settings.ollamaModel);
@@ -973,84 +689,84 @@ function setupEventListeners() {
         localStorage.setItem('martha_speech_rate', settings.speechRate);
         localStorage.setItem('martha_voice_name', settings.voiceName);
         localStorage.setItem('martha_wake_word_enabled', settings.wakeWordEnabled);
+        localStorage.setItem('martha_haptics_enabled', settings.hapticsEnabled);
         localStorage.setItem('martha_sound_effects', settings.soundEffectsEnabled);
         localStorage.setItem('martha_auto_speak', settings.autoSpeakEnabled);
 
         settingsDrawer.classList.remove('open');
         showToast("Settings Saved Successfully");
-
-        if (settings.wakeWordEnabled) {
-            startRecognition();
-        } else {
-            stopRecognition();
-        }
-
-        if (settings.autoSpeakEnabled) {
-            muteVoiceBtn.classList.remove('muted');
-            muteVoiceBtn.querySelector('i').className = 'fa-solid fa-volume-high';
-        } else {
-            muteVoiceBtn.classList.add('muted');
-            muteVoiceBtn.querySelector('i').className = 'fa-solid fa-volume-xmark';
-            window.speechSynthesis.cancel();
-        }
+        if (settings.wakeWordEnabled) startRecognition(); else stopRecognition();
+        muteVoiceBtn.classList.toggle('muted', !settings.autoSpeakEnabled);
+        muteVoiceBtn.querySelector('i').className = settings.autoSpeakEnabled ? 'fa-solid fa-volume-high' : 'fa-solid fa-volume-xmark';
     });
 
-    aiProviderSelect.addEventListener('change', toggleAIProviderFields);
-
-    micTriggerBtn.addEventListener('click', () => {
-        if (appState === 'sleeping') {
-            triggerActivation();
-        } else {
-            stopEverything();
-        }
-    });
-
-    if (stopSpeakingBtn) {
-        stopSpeakingBtn.addEventListener('click', () => {
-            stopEverything();
-            showToast("Assistant Stopped");
-        });
-    }
+    $('ai-provider').addEventListener('change', toggleAIProviderFields);
+    micTriggerBtn.addEventListener('click', () => appState === 'sleeping' ? triggerActivation() : stopEverything());
+    marthaOrb.addEventListener('click', () => appState === 'sleeping' ? triggerActivation() : stopEverything());
+    if (stopSpeakingBtn) stopSpeakingBtn.addEventListener('click', () => { stopEverything(); showToast("Assistant Stopped"); });
 
     muteVoiceBtn.addEventListener('click', () => {
+        triggerHaptic('tap');
         settings.autoSpeakEnabled = !settings.autoSpeakEnabled;
         localStorage.setItem('martha_auto_speak', settings.autoSpeakEnabled);
-        autoSpeakCheckbox.checked = settings.autoSpeakEnabled;
-
-        if (settings.autoSpeakEnabled) {
-            muteVoiceBtn.classList.remove('muted');
-            muteVoiceBtn.querySelector('i').className = 'fa-solid fa-volume-high';
-            showToast("Speech synthesis enabled");
-        } else {
-            muteVoiceBtn.classList.add('muted');
-            muteVoiceBtn.querySelector('i').className = 'fa-solid fa-volume-xmark';
-            window.speechSynthesis.cancel();
-            showToast("Speech synthesis muted");
-            if (appState === 'speaking') {
-                setAgentState('sleeping');
-            }
-        }
+        $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
+        muteVoiceBtn.classList.toggle('muted', !settings.autoSpeakEnabled);
+        muteVoiceBtn.querySelector('i').className = settings.autoSpeakEnabled ? 'fa-solid fa-volume-high' : 'fa-solid fa-volume-xmark';
+        if (!settings.autoSpeakEnabled && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+        showToast(settings.autoSpeakEnabled ? "Speech synthesis enabled" : "Speech synthesis muted");
     });
 
-    clearChatBtn.addEventListener('click', () => {
+    $('clear-chat-btn').addEventListener('click', () => {
+        triggerHaptic('tap');
         chatMessages.innerHTML = '';
         addSystemMessage("Log cleared. Martha is listening...");
-        showToast("Session history cleared");
     });
 
-    sendQueryBtn.addEventListener('click', sendTextQuery);
-    textQueryInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            sendTextQuery();
-        }
+    const submitQuery = () => {
+        const txt = textQueryInput.value.trim();
+        if (!txt) return;
+        triggerHaptic('tap');
+        textQueryInput.value = '';
+        if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+        handleCommand(txt);
+    };
+    $('send-query-btn').addEventListener('click', submitQuery);
+    textQueryInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitQuery(); });
+
+    // QR Code Modal & PWA
+    if ($('qr-connect-btn')) $('qr-connect-btn').addEventListener('click', openQRConnectModal);
+    if ($('close-qr-modal-btn')) $('close-qr-modal-btn').addEventListener('click', () => { if (qrModal) qrModal.style.display = 'none'; });
+    if ($('copy-lan-url-btn')) $('copy-lan-url-btn').addEventListener('click', () => {
+        triggerHaptic('tap');
+        navigator.clipboard.writeText($('lan-url-text').textContent).then(() => showToast("LAN URL Copied!"));
+    });
+
+    if (installPwaBtn) installPwaBtn.addEventListener('click', handleInstallClick);
+    if ($('pwa-banner-install')) $('pwa-banner-install').addEventListener('click', handleInstallClick);
+    if ($('pwa-banner-dismiss')) $('pwa-banner-dismiss').addEventListener('click', () => {
+        if (pwaInstallBanner) pwaInstallBanner.style.display = 'none';
+        sessionStorage.setItem('martha_pwa_dismissed', 'true');
+    });
+    if ($('close-ios-modal-btn')) $('close-ios-modal-btn').addEventListener('click', () => {
+        if (iosInstallModal) iosInstallModal.style.display = 'none';
     });
 }
 
-function sendTextQuery() {
-    const text = textQueryInput.value.trim();
-    if (!text) return;
-    
-    textQueryInput.value = '';
-    window.speechSynthesis.cancel();
-    handleCommand(text);
+async function openQRConnectModal() {
+    triggerHaptic('tap');
+    let url = window.location.origin;
+    try {
+        const info = await fetch(getApiUrl('/api/info')).then(r => r.json());
+        if (info?.lan_url) url = info.lan_url;
+    } catch (e) {}
+
+    $('lan-url-text').textContent = url;
+    const box = $('qr-code-display');
+    box.innerHTML = '';
+    const img = new Image(180, 180);
+    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(url)}&margin=2`;
+    img.alt = "Scan with phone camera";
+    img.onerror = () => { box.innerHTML = `<div style="font-family:monospace;font-size:11px;color:#09090e;padding:8px;">${url}</div>`; };
+    box.appendChild(img);
+    if (qrModal) qrModal.style.display = 'flex';
 }

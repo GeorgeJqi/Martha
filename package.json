@@ -1,0 +1,34 @@
+{
+  "name": "martha-voice-ai",
+  "version": "1.1.0",
+  "description": "Cross-platform Local Voice AI Assistant and Web Research Agent",
+  "private": true,
+  "scripts": {
+    "cap:sync": "cap sync",
+    "cap:android": "cap add android && cap open android",
+    "cap:ios": "cap add ios && cap open ios",
+    "build:android": "cap sync android && cap open android",
+    "build:ios": "cap sync ios && cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/app": "^6.0.1",
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/haptics": "^6.0.1",
+    "@capacitor/ios": "^6.1.2",
+    "@capacitor/splash-screen": "^6.0.2",
+    "@capacitor/status-bar": "^6.0.1"
+  },
+  "keywords": [
+    "voice-assistant",
+    "ai",
+    "alexa-alternative",
+    "local-ai",
+    "android",
+    "ios",
+    "pwa"
+  ],
+  "author": "Martha Open Source Community",
+  "license": "MIT"
+}

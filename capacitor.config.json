@@ -1,0 +1,32 @@
+{
+  "appId": "com.martha.assistant",
+  "appName": "Martha",
+  "webDir": "web",
+  "bundledWebRuntime": false,
+  "backgroundColor": "#09090e",
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "ios": {
+    "contentInset": "always",
+    "scrollEnabled": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#09090e",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#09090e",
+      "overlaysWebView": true
+    },
+    "Haptics": {}
+  }
+}

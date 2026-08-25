@@ -1,0 +1,52 @@
+{
+  "name": "Martha AI Voice Assistant",
+  "short_name": "Martha",
+  "description": "Local, offline-capable AI voice assistant and automated web research agent.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#09090e",
+  "theme_color": "#09090e",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Talk to Martha",
+      "short_name": "Voice",
+      "description": "Activate voice assistant microphone",
+      "url": "./index.html?mode=voice",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Web Research",
+      "short_name": "Search",
+      "description": "Start automated web research",
+      "url": "./index.html?mode=search",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
