@@ -40,6 +40,12 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         })
         super().__init__(*args, directory=DIRECTORY, **kwargs)
 
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        super().end_headers()
+
     def do_OPTIONS(self):
         """CORS pre-flight handler for mobile apps and standalone clients."""
         self.send_response(200)
@@ -90,6 +96,53 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == '/api/tts':
             return self.handle_tts(data.get('text', '').strip(), data.get('action', '').strip())
+
+        if parsed.path == '/api/transcribe':
+            try:
+                import base64
+                audio_b64 = data.get('audio', '')
+                mime = data.get('mime', 'audio/wav')
+                api_key = data.get('api_key', '')
+                
+                if not audio_b64:
+                    return self.send_json({"error": "No audio payload provided"}, status=400)
+
+                # Gemini Audio Transcription
+                if api_key:
+                    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                    raw_mime = mime.split(';')[0]
+                    payload = json.dumps({
+                        "contents": [{
+                            "parts": [
+                                {"text": "Transcribe the spoken audio words accurately. Return ONLY the transcribed text, nothing else."},
+                                {"inline_data": {"mime_type": raw_mime, "data": audio_b64}}
+                            ]
+                        }]
+                    }).encode('utf-8')
+                    req = urllib.request.Request(gemini_url, data=payload, headers={'Content-Type': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=15) as res:
+                        res_json = json.loads(res.read().decode('utf-8'))
+                        text = res_json.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+                        return self.send_json({"text": text})
+
+                # Google Speech Recognition fallback
+                raw_bytes = base64.b64decode(audio_b64)
+                try:
+                    url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=en-US&client=chromium"
+                    req = urllib.request.Request(url, data=raw_bytes, headers={'Content-Type': f'{mime}; rate=16000;'})
+                    with urllib.request.urlopen(req, timeout=8) as res:
+                        for line in res.read().decode('utf-8', errors='ignore').split('\n'):
+                            if line.strip():
+                                parsed_line = json.loads(line)
+                                if parsed_line.get('result'):
+                                    text = parsed_line['result'][0]['alternative'][0]['transcript']
+                                    return self.send_json({"text": text})
+                except Exception:
+                    pass
+
+                return self.send_json({"text": "", "error": "Transcription unavailable"})
+            except Exception as e:
+                return self.send_json({"error": str(e), "text": ""}, status=500)
 
         if parsed.path == '/api/local-chat':
             try:

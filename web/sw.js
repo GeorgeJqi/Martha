@@ -1,14 +1,13 @@
 /* ==========================================================================
    MARTHA - SERVICE WORKER (PWA & OFFLINE CACHE)
-   Provides instant launch, offline asset caching, and standalone mobile app speed.
    ========================================================================== */
 
-const CACHE_NAME = 'martha-pwa-v1.1';
+const CACHE_NAME = 'martha-pwa-v3.1';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
-    './index.css',
-    './app.js',
+    './index.css?v=3.1',
+    './app.js?v=3.1',
     './manifest.json',
     './icons/icon-192.png',
     './icons/icon-512.png',
@@ -17,24 +16,23 @@ const ASSETS_TO_CACHE = [
     './icons/icon.svg'
 ];
 
-// Install Event - Pre-cache core app shell
+// Install Event
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
-            console.log('[SW] Pre-caching Martha app shell');
             return cache.addAll(ASSETS_TO_CACHE);
         }).then(() => self.skipWaiting())
     );
 });
 
-// Activate Event - Clean up stale caches
+// Activate Event - Clean up stale caches immediately
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then((keyList) => {
             return Promise.all(
                 keyList.map((key) => {
                     if (key !== CACHE_NAME) {
-                        console.log('[SW] Removing old cache:', key);
+                        console.log('[SW] Deleting stale cache:', key);
                         return caches.delete(key);
                     }
                 })
@@ -43,44 +41,33 @@ self.addEventListener('activate', (event) => {
     );
 });
 
-// Fetch Event - Network First with Cache Fallback for dynamic/API routes, Cache First for static assets
+// Fetch Event - Network First with Cache Fallback
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // Never cache local backend APIs or search queries
+    // Never cache API routes
     if (url.pathname.startsWith('/api/') || event.request.method !== 'GET') {
         return;
     }
 
     event.respondWith(
-        caches.match(event.request).then((cachedResponse) => {
-            if (cachedResponse) {
-                // Return cache and update in background (Stale While Revalidate)
-                fetch(event.request).then((networkResponse) => {
-                    if (networkResponse && networkResponse.status === 200) {
-                        caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(event.request, networkResponse);
-                        });
-                    }
-                }).catch(() => {});
-                return cachedResponse;
-            }
-
-            return fetch(event.request).then((networkResponse) => {
-                if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
-                    return networkResponse;
+        fetch(event.request)
+            .then((networkResponse) => {
+                if (networkResponse && networkResponse.status === 200) {
+                    const responseToCache = networkResponse.clone();
+                    caches.open(CACHE_NAME).then((cache) => {
+                        cache.put(event.request, responseToCache);
+                    });
                 }
-                const responseToCache = networkResponse.clone();
-                caches.open(CACHE_NAME).then((cache) => {
-                    cache.put(event.request, responseToCache);
-                });
                 return networkResponse;
-            }).catch(() => {
-                // Offline fallback
-                if (event.request.mode === 'navigate') {
-                    return caches.match('./index.html');
-                }
-            });
-        })
+            })
+            .catch(() => {
+                return caches.match(event.request).then((cachedResponse) => {
+                    if (cachedResponse) return cachedResponse;
+                    if (event.request.mode === 'navigate') {
+                        return caches.match('./index.html');
+                    }
+                });
+            })
     );
 });
