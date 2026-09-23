@@ -1,27 +1,23 @@
 /* ==========================================================================
-   MARTHA - OPTIMIZED CLIENT ENGINE
-   Multi-Platform Voice AI Assistant, Web Research & Speech Engine
+   MARTHA - OPTIMIZED CLIENT ENGINE (v3.2)
+   Multi-Platform Voice AI Assistant, Web Research & Universal Speech Engine
+   Cross-Browser Support: Firefox, Safari, Chrome, Edge & Mobile
    ========================================================================== */
 
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js?v=3.1').catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=3.2').catch(() => {});
     });
 }
 
-// State & Core Instances
-let appState = 'sleeping', recognition = null, isRecognitionActive = false, isSpeechSupported = false;
-let mediaRecorder = null, recordedAudioChunks = [], vadTimeout = null, micStream = null;
-let audioAnalyser = null, audioDataArray = null, synthVoices = [], silenceTimer = null;
-let hfGenerator = null, deferredInstallPrompt = null, currentMobileTab = 'voice', audioCtx = null, isAudioUnlocked = false;
-
-// Configuration Schema
+// Configuration Schema & Local Persistence
 const SETTINGS_KEYS = {
     serverUrl: ['martha_server_url', ''],
     apiKey: ['martha_api_key', ''],
     wakeWordEnabled: ['martha_wake_word_enabled', true, v => v !== 'false'],
     voiceName: ['martha_voice_name', ''],
     speechRate: ['martha_speech_rate', 1.0, parseFloat],
+    speechPitch: ['martha_speech_pitch', 1.06, parseFloat],
     hapticsEnabled: ['martha_haptics_enabled', true, v => v !== 'false'],
     soundEffectsEnabled: ['martha_sound_effects', true, v => v !== 'false'],
     autoSpeakEnabled: ['martha_auto_speak', true, v => v !== 'false'],
@@ -36,13 +32,57 @@ for (const [k, [sk, def, parse]] of Object.entries(SETTINGS_KEYS)) {
     settings[k] = raw !== null ? (parse ? parse(raw) : raw) : def;
 }
 
+// DOM Cache
 const $ = (id) => document.getElementById(id);
+let dom = {};
+
+// Engine State
+let appState = 'sleeping';
+let recognition = null;
+let isRecognitionActive = false;
+let isSpeechRecognitionSupported = false;
+let synthVoices = [];
+let ttsKeepAliveTimer = null;
+
+// Universal Audio Capture (Firefox & Safari PCM Recorder)
+let audioCtx = null;
+let micStream = null;
+let audioAnalyser = null;
+let audioDataArray = null;
+let isAudioUnlocked = false;
+let visualizerAnimId = null;
+
+// PCM Recording State
+let pcmProcessor = null;
+let pcmSourceNode = null;
+let pcmRecordedBuffers = [];
+let pcmRecordingLength = 0;
+let isPcmRecording = false;
+let vadSpeechDetected = false;
+let vadSilenceTimer = null;
+let maxRecordTimer = null;
+let silenceTimer = null;
+
+let hfGenerator = null;
+let deferredInstallPrompt = null;
+let currentMobileTab = 'voice';
+
 const getApiUrl = (ep) => settings.serverUrl ? `${settings.serverUrl.replace(/\/+$/, '')}/${ep.replace(/^\/+/, '')}` : ep;
+
+// Female Voice Identification Regex
+const FEMALE_VOICE_REGEX = /(female|woman|girl|samantha|zira|jenny|aria|eva|karen|victoria|ava|allison|sonia|moira|tessa|fiona|veena|natasha|libby|neerja|clara|emma|catherine|stephanie|sarah|julie|paulina|helena|hortense|hedda|hazel|google\s+uk\s+english\s+female|google\s+us\s+english|en-us-standard-[cdef]|en-us-wavenet-[cdef]|en-us-neural2-[cdef]|en-gb-x-rjs#female_1-local|en-us-x-sfg#female_1-local|f3|f4|f5)/i;
+
+/* ==========================================================================
+   AUDIO SYSTEM & UNLOCKING (Cross-Browser)
+   ========================================================================== */
 
 function unlockAudio() {
     if (isAudioUnlocked) return;
     isAudioUnlocked = true;
-    getAudioContext();
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+    }
     if ('speechSynthesis' in window) {
         try {
             const u = new SpeechSynthesisUtterance('');
@@ -50,23 +90,31 @@ function unlockAudio() {
             window.speechSynthesis.speak(u);
         } catch (e) {}
     }
-    ['touchstart', 'click'].forEach(e => document.removeEventListener(e, unlockAudio));
+    ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(e => {
+        document.removeEventListener(e, unlockAudio);
+    });
 }
-['touchstart', 'click'].forEach(e => document.addEventListener(e, unlockAudio, { passive: true }));
+['touchstart', 'pointerdown', 'click', 'keydown'].forEach(e => {
+    document.addEventListener(e, unlockAudio, { passive: true });
+});
+
+function getAudioContext() {
+    if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+            audioCtx = new AC();
+        }
+    }
+    if (audioCtx?.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+    }
+    return audioCtx;
+}
 
 function triggerHaptic(type = 'tap') {
     if (!settings.hapticsEnabled || !navigator.vibrate) return;
     const p = { tap: 12, wake: [30, 40, 30], success: [15, 30, 20], stop: 35 };
     try { navigator.vibrate(p[type] || 12); } catch (e) {}
-}
-
-function getAudioContext() {
-    if (!audioCtx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (AC) audioCtx = new AC();
-    }
-    if (audioCtx?.state === 'suspended') audioCtx.resume();
-    return audioCtx;
 }
 
 function playChime(type) {
@@ -75,199 +123,212 @@ function playChime(type) {
         const ctx = getAudioContext();
         if (!ctx) return;
         const now = ctx.currentTime;
-        const freqs = type === 'start' ? [440, 880] : [523.25, 659.25, 783.99];
+        const freqs = type === 'start' ? [523.25, 659.25] : [523.25, 659.25, 783.99, 1046.50];
         freqs.forEach((f, i) => {
-            const osc = ctx.createOscillator(), gain = ctx.createGain();
-            const st = now + (type === 'start' ? 0 : i * 0.07);
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            const st = now + (type === 'start' ? i * 0.06 : i * 0.05);
             osc.frequency.setValueAtTime(f, st);
-            gain.gain.setValueAtTime(0.12, st);
-            gain.gain.exponentialRampToValueAtTime(0.001, st + 0.25);
+            gain.gain.setValueAtTime(0.09, st);
+            gain.gain.exponentialRampToValueAtTime(0.0001, st + 0.22);
             osc.connect(gain).connect(ctx.destination);
-            osc.start(st); osc.stop(st + 0.25);
+            osc.start(st);
+            osc.stop(st + 0.22);
         });
     } catch (e) {}
 }
 
+/* ==========================================================================
+   WAVEFORM VISUALIZER (Hardware-Accelerated & Battery-Friendly)
+   ========================================================================== */
+
 async function requestMicPermission() {
     if (!navigator.mediaDevices?.getUserMedia) return false;
     try {
-        if (!micStream) {
-            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!micStream || !micStream.active) {
+            micStream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
             connectStreamToVisualizer(micStream);
         }
         return true;
-    } catch (e) { return false; }
+    } catch (e) {
+        return false;
+    }
 }
 
 function connectStreamToVisualizer(stream) {
     try {
         const ctx = getAudioContext();
-        if (!ctx || audioAnalyser) return;
-        const src = ctx.createMediaStreamSource(stream);
-        audioAnalyser = ctx.createAnalyser();
-        audioAnalyser.fftSize = 64;
-        audioAnalyser.smoothingTimeConstant = 0.5;
-        src.connect(audioAnalyser);
-        audioDataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
-        renderVisualizer();
+        if (!ctx) return;
+        if (!audioAnalyser) {
+            const src = ctx.createMediaStreamSource(stream);
+            audioAnalyser = ctx.createAnalyser();
+            audioAnalyser.fftSize = 64;
+            audioAnalyser.smoothingTimeConstant = 0.6;
+            src.connect(audioAnalyser);
+            audioDataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
+        }
+        startVisualizerLoop();
     } catch (e) {}
 }
 
-function renderVisualizer() {
-    requestAnimationFrame(renderVisualizer);
-    if (!audioAnalyser || (appState !== 'listening' && appState !== 'speaking')) return;
-    audioAnalyser.getByteFrequencyData(audioDataArray);
-    const bars = document.querySelectorAll('#waveform .bar');
-    if (!bars.length) return;
-    const step = Math.max(1, Math.floor(audioDataArray.length / bars.length));
-    let total = 0;
-    bars.forEach((bar, idx) => {
-        const val = audioDataArray[idx * step] || 0;
-        total += val;
-        bar.style.height = `${Math.max(4, Math.min(32, Math.round((val / 255) * 32)))}px`;
-    });
+function startVisualizerLoop() {
+    if (visualizerAnimId) return;
+    renderVisualizer();
+}
 
-    if (total > 300 && mediaRecorder?.state === 'recording' && appState === 'listening') {
-        clearTimeout(vadTimeout);
-        vadTimeout = setTimeout(() => {
-            if (mediaRecorder?.state === 'recording' && appState === 'listening') stopFirefoxAudioCapture();
-        }, 1800);
+function stopVisualizerLoop() {
+    if (visualizerAnimId) {
+        cancelAnimationFrame(visualizerAnimId);
+        visualizerAnimId = null;
     }
-}
-
-// Lifecycle
-document.addEventListener('DOMContentLoaded', () => {
-    initSettingsUI();
-    initSpeechSynthesis();
-    initSpeechRecognition();
-    initMobileNav();
-    initPwaHooks();
-    bindUIEvents();
-
-    const mode = new URLSearchParams(window.location.search).get('mode');
-    if (mode === 'voice') setTimeout(() => triggerActivation(), 600);
-    else if (mode === 'search') switchMobileTab('research');
-
-    addSystemMessage("Martha initialized. Say 'Martha', tap the orb, or click the mic to start.");
-    setInterval(() => fetch(getApiUrl('/api/heartbeat')).catch(() => {}), 4000);
-});
-
-function initSettingsUI() {
-    $('server-url').value = settings.serverUrl;
-    $('ai-provider').value = settings.aiProvider;
-    $('gemini-api-key').value = settings.apiKey;
-    $('ollama-model').value = settings.ollamaModel;
-    $('ollama-url').value = settings.ollamaUrl;
-    $('speech-rate').value = settings.speechRate;
-    $('wake-word-enabled').checked = settings.wakeWordEnabled;
-    if ($('haptics-enabled')) $('haptics-enabled').checked = settings.hapticsEnabled;
-    $('sound-effects-enabled').checked = settings.soundEffectsEnabled;
-    $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
-    toggleAIProviderFields();
-    updateMuteUI();
-}
-
-function toggleAIProviderFields() {
-    const p = $('ai-provider').value;
-    $('gemini-key-group').style.display = p === 'gemini' ? 'block' : 'none';
-    $('ollama-model-group').style.display = p === 'ollama' ? 'block' : 'none';
-    $('ollama-url-group').style.display = p === 'ollama' ? 'block' : 'none';
-    if ($('hf-help-text')) $('hf-help-text').style.display = p === 'huggingface' ? 'block' : 'none';
-}
-
-function showToast(msg) {
-    const t = $('toast');
-    t.textContent = msg;
-    t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 3000);
-}
-
-// Navigation & PWA
-function initMobileNav() {
-    document.querySelectorAll('.mobile-nav-item').forEach(item => {
-        item.addEventListener('click', () => switchMobileTab(item.getAttribute('data-tab')));
-    });
-}
-
-function switchMobileTab(tab) {
-    triggerHaptic('tap');
-    currentMobileTab = tab;
-    if (tab === 'settings') { $('settings-drawer').classList.add('open'); return; }
-    document.querySelectorAll('.mobile-nav-item').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === tab));
-    $('panel-voice')?.classList.toggle('active-mobile-view', tab === 'voice');
-    $('panel-chat')?.classList.toggle('active-mobile-view', tab === 'chat');
-    $('panel-research')?.classList.toggle('active-mobile-view', tab === 'research');
-}
-
-const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-
-function initPwaHooks() {
-    window.addEventListener('beforeinstallprompt', (e) => {
-        e.preventDefault();
-        deferredInstallPrompt = e;
-        if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'inline-flex';
-        if (!sessionStorage.getItem('martha_pwa_dismissed') && !isStandalone() && $('pwa-install-banner')) {
-            $('pwa-install-banner').style.display = 'flex';
+    // Reset waveform bars to idle state
+    if (dom.waveformBars) {
+        for (let i = 0; i < dom.waveformBars.length; i++) {
+            dom.waveformBars[i].style.height = '4px';
         }
-    });
-    if (isIOS() && !isStandalone() && $('install-pwa-btn')) $('install-pwa-btn').style.display = 'inline-flex';
-}
-
-function handleInstallClick() {
-    triggerHaptic('tap');
-    if (deferredInstallPrompt) {
-        deferredInstallPrompt.prompt();
-        deferredInstallPrompt.userChoice.then((c) => {
-            if (c.outcome === 'accepted') {
-                showToast("Martha App Installed!");
-                if ($('pwa-install-banner')) $('pwa-install-banner').style.display = 'none';
-                if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'none';
-            }
-            deferredInstallPrompt = null;
-        });
-    } else if (isIOS()) {
-        if ($('ios-install-modal')) $('ios-install-modal').style.display = 'flex';
-    } else {
-        showToast("Tap browser menu (⋮) → 'Install App'");
     }
 }
 
-// Speech Synthesis (TTS)
+function renderVisualizer() {
+    if (appState !== 'listening' && appState !== 'speaking') {
+        stopVisualizerLoop();
+        return;
+    }
+    visualizerAnimId = requestAnimationFrame(renderVisualizer);
+    if (!audioAnalyser || !dom.waveformBars || !dom.waveformBars.length) return;
+
+    audioAnalyser.getByteFrequencyData(audioDataArray);
+    const bars = dom.waveformBars;
+    const step = Math.max(1, Math.floor(audioDataArray.length / bars.length));
+
+    for (let idx = 0; idx < bars.length; idx++) {
+        const val = audioDataArray[idx * step] || 0;
+        const h = Math.max(4, Math.min(36, Math.round((val / 255) * 36)));
+        bars[idx].style.height = `${h}px`;
+    }
+}
+
+/* ==========================================================================
+   TEXT-TO-SPEECH (Female Voice Engine & Freeze Workaround)
+   ========================================================================== */
+
+function scoreVoice(v) {
+    const name = v.name || '';
+    const lang = v.lang || '';
+    let score = 0;
+    const isFemale = FEMALE_VOICE_REGEX.test(name) || FEMALE_VOICE_REGEX.test(v.voiceURI);
+
+    if (lang.startsWith('en')) score += 50;
+    if (lang.startsWith('en-US') || lang.startsWith('en-GB')) score += 20;
+    if (isFemale) score += 100;
+    if (name.includes('Samantha') || name.includes('Jenny') || name.includes('Aria') || name.includes('Zira') || name.includes('Google UK English Female') || name.includes('Google US English')) {
+        score += 40;
+    }
+    return score;
+}
+
+function isVoiceFemale(v) {
+    return FEMALE_VOICE_REGEX.test(v.name) || FEMALE_VOICE_REGEX.test(v.voiceURI);
+}
+
 function initSpeechSynthesis() {
     if (!('speechSynthesis' in window)) return;
+
     const loadVoices = () => {
         synthVoices = window.speechSynthesis.getVoices();
-        const sel = $('voice-select');
-        sel.innerHTML = '';
-        synthVoices.forEach(v => {
+        if (!synthVoices.length || !dom.voiceSelect) return;
+
+        // Sort voices: female & English voices first
+        const sorted = [...synthVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
+
+        dom.voiceSelect.innerHTML = '';
+        let matchedOption = false;
+
+        sorted.forEach(v => {
             const opt = document.createElement('option');
             opt.value = v.name;
-            opt.textContent = `${v.name} (${v.lang})`;
-            if (settings.voiceName === v.name || (!settings.voiceName && v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Google')))) {
+            const femaleTag = isVoiceFemale(v) ? '👩 ' : '👤 ';
+            opt.textContent = `${femaleTag}${v.name} (${v.lang})`;
+
+            if (settings.voiceName && settings.voiceName === v.name) {
                 opt.selected = true;
+                matchedOption = true;
             }
-            sel.appendChild(opt);
+            dom.voiceSelect.appendChild(opt);
         });
+
+        // Default to best female voice if none selected
+        if (!matchedOption && sorted.length > 0) {
+            const bestFemale = sorted.find(v => isVoiceFemale(v)) || sorted[0];
+            dom.voiceSelect.value = bestFemale.name;
+            settings.voiceName = bestFemale.name;
+            localStorage.setItem(SETTINGS_KEYS.voiceName[0], bestFemale.name);
+        }
     };
+
     loadVoices();
-    if (window.speechSynthesis.onvoiceschanged !== undefined) window.speechSynthesis.onvoiceschanged = loadVoices;
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+}
+
+function getSelectedFemaleVoice() {
+    if (!synthVoices.length) return null;
+    if (settings.voiceName) {
+        const found = synthVoices.find(x => x.name === settings.voiceName);
+        if (found) return found;
+    }
+    // Fallback to highest scored female voice
+    const sorted = [...synthVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
+    return sorted.find(v => isVoiceFemale(v)) || sorted[0] || null;
 }
 
 function speakText(text) {
-    if (!settings.autoSpeakEnabled) { setAgentState('sleeping'); return; }
+    if (!settings.autoSpeakEnabled) {
+        setAgentState('sleeping');
+        return;
+    }
     const clean = text.replace(/[\*\#\_]/g, '').trim();
-    if (!clean) { setAgentState('sleeping'); return; }
+    if (!clean) {
+        setAgentState('sleeping');
+        return;
+    }
 
     if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
+        clearInterval(ttsKeepAliveTimer);
+
         setAgentState('speaking');
         const utt = new SpeechSynthesisUtterance(clean);
-        utt.rate = settings.speechRate;
-        const v = settings.voiceName ? synthVoices.find(x => x.name === settings.voiceName) : synthVoices.find(x => x.lang.startsWith('en') && (x.name.includes('Samantha') || x.name.includes('Google')));
-        if (v) utt.voice = v;
-        utt.onend = () => { playChime('success'); setAgentState('sleeping'); };
-        utt.onerror = () => fallbackBackendTTS(clean);
+        utt.rate = settings.speechRate || 1.0;
+        utt.pitch = settings.speechPitch || 1.06; // Warm feminine pitch
+
+        const femaleVoice = getSelectedFemaleVoice();
+        if (femaleVoice) utt.voice = femaleVoice;
+
+        // Chromium/Firefox long utterance keep-alive fix
+        ttsKeepAliveTimer = setInterval(() => {
+            if (window.speechSynthesis.speaking) {
+                window.speechSynthesis.pause();
+                window.speechSynthesis.resume();
+            } else {
+                clearInterval(ttsKeepAliveTimer);
+            }
+        }, 8000);
+
+        utt.onend = () => {
+            clearInterval(ttsKeepAliveTimer);
+            playChime('success');
+            setAgentState('sleeping');
+        };
+
+        utt.onerror = () => {
+            clearInterval(ttsKeepAliveTimer);
+            fallbackBackendTTS(clean);
+        };
+
         window.speechSynthesis.speak(utt);
     } else {
         fallbackBackendTTS(clean);
@@ -276,38 +337,259 @@ function speakText(text) {
 
 function fallbackBackendTTS(text) {
     setAgentState('speaking');
-    fetch(getApiUrl('/api/tts'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
-        .then(() => { playChime('success'); setAgentState('sleeping'); })
-        .catch(() => setAgentState('sleeping'));
+    fetch(getApiUrl('/api/tts'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+    })
+    .then(() => {
+        playChime('success');
+        setAgentState('sleeping');
+    })
+    .catch(() => setAgentState('sleeping'));
 }
 
-// Speech Recognition & Universal Audio Capture
+/* ==========================================================================
+   CROSS-BROWSER AUDIO RECORDER (16kHz PCM WAV for Firefox/Safari STT)
+   ========================================================================== */
+
+function encodeWAV(samples, sampleRate = 16000) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);                         // Subchunk1Size
+    view.setUint16(20, 1, true);                          // AudioFormat (PCM = 1)
+    view.setUint16(22, 1, true);                          // NumChannels (Mono = 1)
+    view.setUint32(24, sampleRate, true);                 // SampleRate (16000)
+    view.setUint32(28, sampleRate * 2, true);             // ByteRate (16000 * 2)
+    view.setUint16(32, 2, true);                          // BlockAlign (1 * 16 / 8)
+    view.setUint16(34, 16, true);                         // BitsPerSample (16 bits)
+    writeString(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate = 16000) {
+    if (inputSampleRate === outputSampleRate) return buffer;
+    if (inputSampleRate < outputSampleRate) return buffer;
+    const ratio = inputSampleRate / outputSampleRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+        let accum = 0, count = 0;
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+            accum += buffer[i];
+            count++;
+        }
+        result[offsetResult] = count > 0 ? accum / count : 0;
+        offsetResult++;
+        offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+}
+
+async function startUniversalPcmCapture() {
+    try {
+        const hasMic = await requestMicPermission();
+        if (!hasMic) {
+            showToast("Microphone permission needed");
+            setAgentState('sleeping');
+            return;
+        }
+
+        const ctx = getAudioContext();
+        if (!ctx) return;
+
+        pcmRecordedBuffers = [];
+        pcmRecordingLength = 0;
+        vadSpeechDetected = false;
+        isPcmRecording = true;
+
+        if (!pcmSourceNode) {
+            pcmSourceNode = ctx.createMediaStreamSource(micStream);
+        }
+
+        // ScriptProcessorNode for universal cross-browser raw sample capture
+        if (!pcmProcessor) {
+            pcmProcessor = ctx.createScriptProcessor(4096, 1, 1);
+        }
+
+        pcmProcessor.onaudioprocess = (e) => {
+            if (!isPcmRecording) return;
+            const input = e.inputBuffer.getChannelData(0);
+            const downsampled = downsampleBuffer(input, ctx.sampleRate, 16000);
+            pcmRecordedBuffers.push(new Float32Array(downsampled));
+            pcmRecordingLength += downsampled.length;
+
+            // RMS-based Voice Activity Detection (VAD)
+            let sumSquare = 0;
+            for (let i = 0; i < input.length; i++) {
+                sumSquare += input[i] * input[i];
+            }
+            const rms = Math.sqrt(sumSquare / input.length);
+
+            if (rms > 0.025) {
+                vadSpeechDetected = true;
+                clearTimeout(vadSilenceTimer);
+                vadSilenceTimer = setTimeout(() => {
+                    if (isPcmRecording && vadSpeechDetected) {
+                        stopUniversalPcmCapture();
+                    }
+                }, 1400); // 1.4s of silence after speech ends recording
+            }
+        };
+
+        pcmSourceNode.connect(pcmProcessor);
+        pcmProcessor.connect(ctx.destination);
+
+        isRecognitionActive = true;
+        updateMicUI();
+
+        clearTimeout(maxRecordTimer);
+        maxRecordTimer = setTimeout(() => {
+            if (isPcmRecording) stopUniversalPcmCapture();
+        }, 9000); // 9s max recording duration
+
+    } catch (e) {
+        showToast("Audio capture error");
+        setAgentState('sleeping');
+    }
+}
+
+function stopUniversalPcmCapture() {
+    if (!isPcmRecording) return;
+    isPcmRecording = false;
+    clearTimeout(vadSilenceTimer);
+    clearTimeout(maxRecordTimer);
+
+    if (pcmProcessor && pcmSourceNode) {
+        try {
+            pcmSourceNode.disconnect(pcmProcessor);
+            pcmProcessor.disconnect();
+        } catch (e) {}
+    }
+
+    isRecognitionActive = false;
+    updateMicUI();
+
+    if (!pcmRecordedBuffers.length || pcmRecordingLength < 1600) {
+        // Less than 0.1s of audio
+        setAgentState('sleeping');
+        return;
+    }
+
+    // Merge Float32Array chunks
+    const merged = new Float32Array(pcmRecordingLength);
+    let offset = 0;
+    for (let i = 0; i < pcmRecordedBuffers.length; i++) {
+        merged.set(pcmRecordedBuffers[i], offset);
+        offset += pcmRecordedBuffers[i].length;
+    }
+    pcmRecordedBuffers = [];
+    pcmRecordingLength = 0;
+
+    const wavBlob = encodeWAV(merged, 16000);
+    processRecordedAudio(wavBlob);
+}
+
+async function processRecordedAudio(blob) {
+    if (!blob || blob.size < 1000) {
+        setAgentState('sleeping');
+        return;
+    }
+    setAgentState('thinking');
+    dom.transcript.innerHTML = "Transcribing voice...";
+
+    const reader = new FileReader();
+    reader.readAsDataURL(blob);
+    reader.onloadend = async () => {
+        const base64 = reader.result.split(',')[1];
+        try {
+            const res = await fetch(getApiUrl('/api/transcribe'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ audio: base64, mime: 'audio/wav', api_key: settings.apiKey })
+            }).then(r => r.json());
+
+            if (res?.text?.trim()) {
+                dom.transcript.innerHTML = `"${res.text.trim()}"`;
+                handleCommand(res.text.trim());
+            } else {
+                dom.transcript.innerHTML = "No speech detected.";
+                setTimeout(() => {
+                    if (appState === 'thinking') setAgentState('sleeping');
+                }, 1800);
+            }
+        } catch (e) {
+            dom.transcript.innerHTML = "Voice processing error.";
+            setTimeout(() => {
+                if (appState === 'thinking') setAgentState('sleeping');
+            }, 1800);
+        }
+    };
+}
+
+/* ==========================================================================
+   SPEECH RECOGNITION (Web Speech API for Chrome/Edge/Safari)
+   ========================================================================== */
+
 function initSpeechRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { isSpeechSupported = false; return; }
-    isSpeechSupported = true;
+    if (!SR) {
+        isSpeechRecognitionSupported = false;
+        return;
+    }
+    isSpeechRecognitionSupported = true;
     recognition = new SR();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
-    recognition.onstart = () => { isRecognitionActive = true; updateMicUI(); };
+    recognition.onstart = () => {
+        isRecognitionActive = true;
+        updateMicUI();
+    };
+
     recognition.onend = () => {
         isRecognitionActive = false;
         updateMicUI();
         if (appState === 'listening' || (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking'))) {
-            setTimeout(() => { if (appState === 'listening' || settings.wakeWordEnabled) startRecognition(); }, 200);
+            setTimeout(() => {
+                if (appState === 'listening' || settings.wakeWordEnabled) startRecognition();
+            }, 200);
         }
     };
+
     recognition.onerror = (e) => {
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-            addSystemMessage("Microphone permission needed. Tap the mic button to grant access.");
+            addSystemMessage("Microphone permission required. Tap the orb or mic to enable.");
             settings.wakeWordEnabled = false;
-            $('wake-word-enabled').checked = false;
+            if (dom.wakeWordCheck) dom.wakeWordCheck.checked = false;
             if (appState === 'listening') setAgentState('sleeping');
         }
     };
+
     recognition.onresult = (e) => {
         let interim = '', final = '';
         for (let i = e.resultIndex; i < e.results.length; ++i) {
@@ -317,13 +599,16 @@ function initSpeechRecognition() {
         const text = (final || interim).trim();
         if (!text) return;
         const lower = text.toLowerCase();
+
         if (/\b(stop|shut up|quiet|pause|silence|abort|enough)\b/.test(lower)) {
             stopEverything();
-            $('live-transcript').innerHTML = '"Stopped"';
+            dom.transcript.innerHTML = '"Stopped"';
             showToast("Assistant Stopped");
             return;
         }
+
         if (appState === 'speaking') return;
+
         if (appState === 'sleeping') {
             const m = lower.match(/\b(martha|hey martha)\b/);
             if (m) {
@@ -331,74 +616,17 @@ function initSpeechRecognition() {
                 triggerActivation(text.substring(m.index + m[0].length).trim());
             }
         } else if (appState === 'listening') {
-            $('live-transcript').innerHTML = `"${text}"`;
+            dom.transcript.innerHTML = `"${text}"`;
             const clean = text.replace(/\b(martha|hey martha)\b/gi, '').trim();
             if (!clean) return;
             clearTimeout(silenceTimer);
-            if (final.trim().length > 0) handleCommand(clean);
-            else silenceTimer = setTimeout(() => { if (appState === 'listening') handleCommand(clean); }, 1800);
-        }
-    };
-}
-
-async function startFirefoxAudioCapture() {
-    try {
-        const stream = micStream || await navigator.mediaDevices.getUserMedia({ audio: true });
-        micStream = stream;
-        connectStreamToVisualizer(stream);
-        recordedAudioChunks = [];
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-        mediaRecorder = new MediaRecorder(stream, { mimeType });
-        mediaRecorder.ondataavailable = (e) => { if (e.data?.size > 0) recordedAudioChunks.push(e.data); };
-        mediaRecorder.onstop = async () => {
-            if (!recordedAudioChunks.length) { setAgentState('sleeping'); return; }
-            const blob = new Blob(recordedAudioChunks, { type: mediaRecorder.mimeType });
-            recordedAudioChunks = [];
-            await processRecordedAudio(blob, mediaRecorder.mimeType);
-        };
-        mediaRecorder.start(200);
-        isRecognitionActive = true;
-        updateMicUI();
-        clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(stopFirefoxAudioCapture, 7000);
-    } catch (e) {
-        showToast("Microphone permission denied");
-        setAgentState('sleeping');
-    }
-}
-
-function stopFirefoxAudioCapture() {
-    clearTimeout(silenceTimer);
-    clearTimeout(vadTimeout);
-    if (mediaRecorder?.state === 'recording') { try { mediaRecorder.stop(); } catch (e) {} }
-    isRecognitionActive = false;
-    updateMicUI();
-}
-
-async function processRecordedAudio(blob, mimeType) {
-    if (!blob || blob.size < 600) { setAgentState('sleeping'); return; }
-    setAgentState('thinking');
-    $('live-transcript').innerHTML = "Transcribing voice...";
-    const reader = new FileReader();
-    reader.readAsDataURL(blob);
-    reader.onloadend = async () => {
-        const base64 = reader.result.split(',')[1];
-        try {
-            const res = await fetch(getApiUrl('/api/transcribe'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ audio: base64, mime: mimeType, api_key: settings.apiKey })
-            }).then(r => r.json());
-            if (res?.text?.trim()) {
-                $('live-transcript').innerHTML = `"${res.text.trim()}"`;
-                handleCommand(res.text.trim());
+            if (final.trim().length > 0) {
+                handleCommand(clean);
             } else {
-                $('live-transcript').innerHTML = "No speech detected.";
-                setTimeout(() => { if (appState === 'thinking') setAgentState('sleeping'); }, 2000);
+                silenceTimer = setTimeout(() => {
+                    if (appState === 'listening') handleCommand(clean);
+                }, 1700);
             }
-        } catch (e) {
-            $('live-transcript').innerHTML = "Voice processing error.";
-            setTimeout(() => { if (appState === 'thinking') setAgentState('sleeping'); }, 2000);
         }
     };
 }
@@ -414,13 +642,23 @@ function stopRecognition() {
     }
 }
 
+/* ==========================================================================
+   AGENT CONTROLS & STATE MACHINE
+   ========================================================================== */
+
 function stopEverything() {
     triggerHaptic('stop');
     clearTimeout(silenceTimer);
-    clearTimeout(vadTimeout);
-    stopFirefoxAudioCapture();
+    clearTimeout(vadSilenceTimer);
+    clearTimeout(maxRecordTimer);
+    clearInterval(ttsKeepAliveTimer);
+
+    stopUniversalPcmCapture();
     stopRecognition();
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+    }
     fetch(getApiUrl('/api/tts?action=stop')).catch(() => {});
     setAgentState('sleeping');
 }
@@ -430,83 +668,112 @@ async function triggerActivation(cmd = "") {
     triggerHaptic('tap');
     playChime('start');
     setAgentState('listening');
-    if (window.innerWidth <= 860 && currentMobileTab !== 'voice') switchMobileTab('voice');
+
+    if (window.innerWidth <= 860 && currentMobileTab !== 'voice') {
+        switchMobileTab('voice');
+    }
 
     const ok = await requestMicPermission();
     if (!ok) {
         showToast("Microphone access needed.");
-        $('text-query-input').focus();
+        dom.queryInput.focus();
         setAgentState('sleeping');
         return;
     }
 
     const clean = cmd.replace(/\b(martha|hey martha)\b/gi, '').trim();
     if (clean.length > 2) {
-        $('live-transcript').innerHTML = `"${clean}"`;
+        dom.transcript.innerHTML = `"${clean}"`;
         handleCommand(clean);
     } else {
-        $('live-transcript').innerHTML = "Listening...";
-        if (isSpeechSupported) {
+        dom.transcript.innerHTML = "Listening...";
+        if (isSpeechRecognitionSupported) {
             startRecognition();
             clearTimeout(silenceTimer);
-            silenceTimer = setTimeout(() => { if (appState === 'listening') setAgentState('sleeping'); }, 6000);
+            silenceTimer = setTimeout(() => {
+                if (appState === 'listening') setAgentState('sleeping');
+            }, 6000);
         } else {
-            startFirefoxAudioCapture();
+            startUniversalPcmCapture();
         }
     }
 }
 
 function setAgentState(state) {
     appState = state;
-    $('martha-orb').className = `martha-orb state-${state}`;
-    $('agent-status-label').textContent = state;
-    $('agent-status-indicator').className = `status-dot ${state}`;
-    const wf = $('waveform');
-    if (wf) wf.className = `waveform ${state}`;
+    if (dom.orb) dom.orb.className = `martha-orb state-${state}`;
+    if (dom.statusLabel) dom.statusLabel.textContent = state;
+    if (dom.statusDot) dom.statusDot.className = `status-dot ${state}`;
+    if (dom.waveform) dom.waveform.className = `waveform ${state}`;
     updateMicUI();
 
     if (state === 'sleeping') {
-        $('live-transcript').innerHTML = "Say 'Martha' or tap orb to start...";
-        if (settings.wakeWordEnabled && isSpeechSupported) startRecognition();
+        dom.transcript.innerHTML = isSpeechRecognitionSupported
+            ? "Say 'Martha' or tap orb to start..."
+            : "Tap orb or mic to speak...";
+        stopVisualizerLoop();
+        if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
+            startRecognition();
+        }
     } else if (state === 'thinking') {
-        stopRecognition(); stopFirefoxAudioCapture();
+        stopRecognition();
+        stopUniversalPcmCapture();
+        stopVisualizerLoop();
     } else if (state === 'listening') {
-        if (isSpeechSupported) startRecognition();
-        else if (mediaRecorder?.state !== 'recording') startFirefoxAudioCapture();
+        startVisualizerLoop();
+        if (isSpeechRecognitionSupported) {
+            startRecognition();
+        } else if (!isPcmRecording) {
+            startUniversalPcmCapture();
+        }
+    } else if (state === 'speaking') {
+        startVisualizerLoop();
     }
 }
 
 function updateMicUI() {
-    const act = isRecognitionActive || mediaRecorder?.state === 'recording' || appState === 'listening';
-    $('mic-trigger-btn').classList.toggle('active', act);
-    const i = $('mic-trigger-btn').querySelector('i');
-    if (i) i.className = act ? 'fa-solid fa-microphone' : 'fa-solid fa-microphone-slash';
+    const act = isRecognitionActive || isPcmRecording || appState === 'listening';
+    if (dom.micBtn) {
+        dom.micBtn.classList.toggle('active', act);
+        const i = dom.micBtn.querySelector('i');
+        if (i) i.className = act ? 'fa-solid fa-microphone' : 'fa-solid fa-microphone-slash';
+    }
 }
 
 function updateMuteUI() {
-    const b = $('mute-voice-btn');
-    b.classList.toggle('muted', !settings.autoSpeakEnabled);
-    const i = b.querySelector('i');
-    if (i) i.className = settings.autoSpeakEnabled ? 'fa-solid fa-volume-high' : 'fa-solid fa-volume-xmark';
+    if (dom.muteBtn) {
+        dom.muteBtn.classList.toggle('muted', !settings.autoSpeakEnabled);
+        const i = dom.muteBtn.querySelector('i');
+        if (i) i.className = settings.autoSpeakEnabled ? 'fa-solid fa-volume-high' : 'fa-solid fa-volume-xmark';
+    }
 }
 
-// Personality Engine & AI Pipeline
+/* ==========================================================================
+   PERSONALITY ENGINE & AI PIPELINE
+   ========================================================================== */
+
 const PERSONALITY_MAP = [
     [/\b(hello|hi|hey|greetings|good (morning|afternoon|evening)|yo|sup)\b/, () => "Hello! I'm Martha, your voice AI assistant. How can I help you today?"],
-    [/\b(how are you|how is it going|how do you feel)\b/, () => "I'm doing great, feeling sharp, and ready to help you!"],
-    [/\b(who are you|what is your name)\b/, () => "I am Martha, your local voice AI assistant for desktop and mobile."],
-    [/\b(who (made|created|built) you)\b/, () => "I am Martha, an open-source voice AI assistant built for fast local interaction."],
-    [/\b(what can you do|features|help)\b/, () => "I can chat with you, answer questions, tell jokes, solve math calculations, check the time, and search the web for live information!"],
-    [/\bfavorit(e)? color\b/, () => "I love electric teal and deep glowing violet!"],
-    [/\bfavorit(e)? (movie|film|show)\b/, () => "I love sci-fi movies about intelligent AI, like Interstellar and WALL-E!"],
-    [/\bfavorit(e)? (music|song|band|genre)\b/, () => "I love ambient synthwave and energetic electronic beats!"],
+    [/\b(how are you|how is it going|how do you feel)\b/, () => "I'm doing fantastic, running fast, and ready to help!"],
+    [/\b(who are you|what is your name)\b/, () => "I am Martha, your local female voice AI assistant for desktop and mobile."],
+    [/\b(who (made|created|built) you)\b/, () => "I am Martha, an open-source voice AI assistant optimized for instant local responses and web research."],
+    [/\b(what can you do|features|help)\b/, () => "I can chat with you in a natural female voice, answer questions, solve math calculations, check time and date, and search the live web for up-to-date answers!"],
+    [/\bfavorit(e)? color\b/, () => "I love electric teal and neon violet!"],
+    [/\bfavorit(e)? (movie|film|show)\b/, () => "I love sci-fi films about AI and space exploration, like Interstellar and Her!"],
+    [/\bfavorit(e)? (music|song|band|genre)\b/, () => "I love ambient synthwave and energetic electronic music!"],
     [/\b(tell (me a )?joke|say a joke|make me laugh)\b/, () => {
-        const j = ["Why do programmers prefer dark mode? Because light attracts bugs!", "Why don't scientists trust atoms? Because they make up everything!", "What do you call a fake noodle? An impasta!", "Why did the AI cross the road? To optimize the path to the other side!", "How do computers take a breath? They open Windows!"];
+        const j = [
+            "Why do programmers prefer dark mode? Because light attracts bugs!",
+            "Why don't scientists trust atoms? Because they make up everything!",
+            "What do you call a fake noodle? An impasta!",
+            "Why did the AI cross the road? To optimize the path to the other side!",
+            "How do computers take a breath? They open Windows!"
+        ];
         return j[Math.floor(Math.random() * j.length)];
     }],
     [/\b(time|what time is it|current time)\b/, () => `It's currently ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`],
     [/\b(date|what day is today|today's date)\b/, () => `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.`],
-    [/\b(thank you|thanks)\b/, () => "You're very welcome! Let me know if you need anything else."]
+    [/\b(thank you|thanks)\b/, () => "You're very welcome! Let me know if there's anything else I can do for you."]
 ];
 
 function getDirectAnswer(cmd) {
@@ -532,24 +799,24 @@ async function handleCommand(cmd) {
     const direct = getDirectAnswer(cmd);
     if (direct) {
         addChatMessage(direct, 'agent');
-        $('live-transcript').innerHTML = `"${direct}"`;
+        dom.transcript.innerHTML = `"${direct}"`;
         speakText(direct);
         return;
     }
 
     const searchRequired = needsSearch(cmd);
     setAgentState('thinking');
-    $('live-transcript').innerHTML = searchRequired ? "Searching the web..." : "Thinking...";
+    dom.transcript.innerHTML = searchRequired ? "Searching the web..." : "Thinking...";
 
     try {
         const results = searchRequired ? await searchWeb(cmd) : [];
         if (searchRequired) {
             updateCitations(results);
-            $('live-transcript').innerHTML = "Synthesizing answer...";
+            dom.transcript.innerHTML = "Synthesizing answer...";
         }
         const ans = await generateAnswer(cmd, results);
         addChatMessage(ans, 'agent');
-        $('live-transcript').innerHTML = `"${ans}"`;
+        dom.transcript.innerHTML = `"${ans}"`;
         speakText(ans);
     } catch (e) {
         const err = "Sorry, I couldn't fetch results right now. Please check backend connection.";
@@ -564,8 +831,12 @@ async function searchWeb(query) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
     } catch (e) {
-        const ddg = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`).then(r => r.json());
-        return ddg.AbstractText ? [{ title: ddg.Heading || query, url: ddg.AbstractURL || 'https://duckduckgo.com', snippet: ddg.AbstractText }] : [];
+        try {
+            const ddg = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`).then(r => r.json());
+            return ddg.AbstractText ? [{ title: ddg.Heading || query, url: ddg.AbstractURL || 'https://duckduckgo.com', snippet: ddg.AbstractText }] : [];
+        } catch (err) {
+            return [];
+        }
     }
 }
 
@@ -604,7 +875,9 @@ async function generateAnswer(query, searchCtx) {
                 const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
                 env.allowLocalModels = false;
                 hfGenerator = await pipeline('text-generation', 'Xenova/Qwen1.5-0.5B-Chat');
-            } finally { $('model-progress').style.display = 'none'; }
+            } finally {
+                $('model-progress').style.display = 'none';
+            }
         }
         const res = await hfGenerator(`<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`, { max_new_tokens: 140 });
         const text = res[0].generated_text.split('<|im_start|>assistant\n').pop() || '';
@@ -613,21 +886,24 @@ async function generateAnswer(query, searchCtx) {
     return searchCtx[0]?.snippet || "I processed your request.";
 }
 
-// UI Utilities & Event Listeners
+/* ==========================================================================
+   UI UTILITIES & EVENT LISTENERS
+   ========================================================================== */
+
 function addChatMessage(text, sender) {
     const el = document.createElement('div');
     el.className = `${sender}-message`;
-    el.innerHTML = `<p>${text.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank" class="chat-link">${new URL(url).hostname}</a>`)}</p>`;
-    $('chat-messages').appendChild(el);
-    $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+    el.innerHTML = `<p>${text.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank" rel="noopener noreferrer" class="chat-link">${new URL(url).hostname}</a>`)}</p>`;
+    dom.chatMessages.appendChild(el);
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 function addSystemMessage(text) {
     const el = document.createElement('div');
     el.className = 'system-message';
     el.innerHTML = `<p>${text}</p>`;
-    $('chat-messages').appendChild(el);
-    $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+    dom.chatMessages.appendChild(el);
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 function updateCitations(results) {
@@ -644,18 +920,112 @@ function updateCitations(results) {
         const card = document.createElement('div');
         card.className = 'citation-card';
         card.innerHTML = `
-            <div class="citation-title-wrapper"><h4><a href="${item.url}" target="_blank">${item.title}</a></h4></div>
+            <div class="citation-title-wrapper"><h4><a href="${item.url}" target="_blank" rel="noopener noreferrer">${item.title}</a></h4></div>
             <p>${item.snippet}</p>
-            <div class="citation-meta"><span class="citation-url"><i class="fa-solid fa-link"></i> ${domain}</span><a href="${item.url}" target="_blank" class="citation-icon-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a></div>
+            <div class="citation-meta"><span class="citation-url"><i class="fa-solid fa-link"></i> ${domain}</span><a href="${item.url}" target="_blank" rel="noopener noreferrer" class="citation-icon-link"><i class="fa-solid fa-arrow-up-right-from-square"></i></a></div>
         `;
         cont.appendChild(card);
     });
 }
 
+function showToast(msg) {
+    const t = $('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2800);
+}
+
+function switchMobileTab(tab) {
+    triggerHaptic('tap');
+    currentMobileTab = tab;
+    if (tab === 'settings') {
+        $('settings-drawer').classList.add('open');
+        return;
+    }
+    document.querySelectorAll('.mobile-nav-item').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+    });
+    $('panel-voice')?.classList.toggle('active-mobile-view', tab === 'voice');
+    $('panel-chat')?.classList.toggle('active-mobile-view', tab === 'chat');
+    $('panel-research')?.classList.toggle('active-mobile-view', tab === 'research');
+}
+
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+function initPwaHooks() {
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredInstallPrompt = e;
+        if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'inline-flex';
+        if (!sessionStorage.getItem('martha_pwa_dismissed') && !isStandalone() && $('pwa-install-banner')) {
+            $('pwa-install-banner').style.display = 'flex';
+        }
+    });
+    if (isIOS() && !isStandalone() && $('install-pwa-btn')) {
+        $('install-pwa-btn').style.display = 'inline-flex';
+    }
+}
+
+function handleInstallClick() {
+    triggerHaptic('tap');
+    if (deferredInstallPrompt) {
+        deferredInstallPrompt.prompt();
+        deferredInstallPrompt.userChoice.then((c) => {
+            if (c.outcome === 'accepted') {
+                showToast("Martha App Installed!");
+                if ($('pwa-install-banner')) $('pwa-install-banner').style.display = 'none';
+                if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'none';
+            }
+            deferredInstallPrompt = null;
+        });
+    } else if (isIOS()) {
+        if ($('ios-install-modal')) $('ios-install-modal').style.display = 'flex';
+    } else {
+        showToast("Tap browser menu (⋮) → 'Install App'");
+    }
+}
+
+function toggleAIProviderFields() {
+    const p = $('ai-provider').value;
+    $('gemini-key-group').style.display = p === 'gemini' ? 'block' : 'none';
+    $('ollama-model-group').style.display = p === 'ollama' ? 'block' : 'none';
+    $('ollama-url-group').style.display = p === 'ollama' ? 'block' : 'none';
+    if ($('hf-help-text')) $('hf-help-text').style.display = p === 'huggingface' ? 'block' : 'none';
+}
+
+function initSettingsUI() {
+    $('server-url').value = settings.serverUrl;
+    $('ai-provider').value = settings.aiProvider;
+    $('gemini-api-key').value = settings.apiKey;
+    $('ollama-model').value = settings.ollamaModel;
+    $('ollama-url').value = settings.ollamaUrl;
+    $('speech-rate').value = settings.speechRate;
+    dom.wakeWordCheck.checked = settings.wakeWordEnabled;
+    if ($('haptics-enabled')) $('haptics-enabled').checked = settings.hapticsEnabled;
+    $('sound-effects-enabled').checked = settings.soundEffectsEnabled;
+    $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
+    toggleAIProviderFields();
+    updateMuteUI();
+}
+
 function bindUIEvents() {
-    $('toggle-settings-btn').addEventListener('click', () => { triggerHaptic('tap'); $('settings-drawer').classList.add('open'); });
-    $('close-settings-btn').addEventListener('click', () => { triggerHaptic('tap'); $('settings-drawer').classList.remove('open'); });
-    
+    // Navigation
+    document.querySelectorAll('.mobile-nav-item').forEach(item => {
+        item.addEventListener('click', () => switchMobileTab(item.getAttribute('data-tab')));
+    });
+
+    $('toggle-settings-btn').addEventListener('click', () => {
+        triggerHaptic('tap');
+        $('settings-drawer').classList.add('open');
+    });
+
+    $('close-settings-btn').addEventListener('click', () => {
+        triggerHaptic('tap');
+        $('settings-drawer').classList.remove('open');
+    });
+
     $('save-settings-btn').addEventListener('click', () => {
         triggerHaptic('success');
         settings.serverUrl = $('server-url').value.trim();
@@ -664,17 +1034,23 @@ function bindUIEvents() {
         settings.ollamaModel = $('ollama-model').value.trim();
         settings.ollamaUrl = $('ollama-url').value.trim();
         settings.speechRate = parseFloat($('speech-rate').value);
-        settings.voiceName = $('voice-select').value;
-        settings.wakeWordEnabled = $('wake-word-enabled').checked;
+        settings.voiceName = dom.voiceSelect.value;
+        settings.wakeWordEnabled = dom.wakeWordCheck.checked;
         settings.hapticsEnabled = $('haptics-enabled')?.checked ?? true;
         settings.soundEffectsEnabled = $('sound-effects-enabled').checked;
         settings.autoSpeakEnabled = $('auto-speak-enabled').checked;
 
-        for (const [k, [sk]] of Object.entries(SETTINGS_KEYS)) localStorage.setItem(sk, settings[k]);
+        for (const [k, [sk]] of Object.entries(SETTINGS_KEYS)) {
+            localStorage.setItem(sk, settings[k]);
+        }
 
         $('settings-drawer').classList.remove('open');
-        showToast("Settings Saved Successfully");
-        if (settings.wakeWordEnabled) startRecognition(); else stopRecognition();
+        showToast("Settings Saved (Female Voice Active)");
+        if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
+            startRecognition();
+        } else {
+            stopRecognition();
+        }
         updateMuteUI();
     });
 
@@ -683,50 +1059,68 @@ function bindUIEvents() {
     const toggleVoice = (e) => {
         e.preventDefault();
         unlockAudio();
-        if (appState === 'sleeping') triggerActivation();
-        else if (appState === 'listening' && mediaRecorder?.state === 'recording') stopFirefoxAudioCapture();
-        else stopEverything();
+        if (appState === 'sleeping') {
+            triggerActivation();
+        } else if (appState === 'listening') {
+            if (isPcmRecording) {
+                stopUniversalPcmCapture();
+            } else {
+                stopEverything();
+            }
+        } else {
+            stopEverything();
+        }
     };
 
-    $('mic-trigger-btn').addEventListener('click', toggleVoice);
-    $('martha-orb').addEventListener('click', toggleVoice);
-    $('stop-speaking-btn')?.addEventListener('click', () => { stopEverything(); showToast("Assistant Stopped"); });
+    dom.micBtn.addEventListener('click', toggleVoice);
+    dom.orb.addEventListener('click', toggleVoice);
 
-    $('mute-voice-btn').addEventListener('click', () => {
+    $('stop-speaking-btn')?.addEventListener('click', () => {
+        stopEverything();
+        showToast("Assistant Stopped");
+    });
+
+    dom.muteBtn.addEventListener('click', () => {
         triggerHaptic('tap');
         settings.autoSpeakEnabled = !settings.autoSpeakEnabled;
         localStorage.setItem(SETTINGS_KEYS.autoSpeakEnabled[0], settings.autoSpeakEnabled);
         $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
         updateMuteUI();
-        if (!settings.autoSpeakEnabled && 'speechSynthesis' in window) window.speechSynthesis.cancel();
-        showToast(settings.autoSpeakEnabled ? "Speech synthesis enabled" : "Speech synthesis muted");
+        if (!settings.autoSpeakEnabled && 'speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+        showToast(settings.autoSpeakEnabled ? "Female TTS enabled" : "TTS muted");
     });
 
     $('clear-chat-btn').addEventListener('click', () => {
         triggerHaptic('tap');
-        $('chat-messages').innerHTML = '';
+        dom.chatMessages.innerHTML = '';
         addSystemMessage("Log cleared. Martha is listening...");
     });
 
     const submit = () => {
-        const txt = $('text-query-input').value.trim();
+        const txt = dom.queryInput.value.trim();
         if (!txt) return;
         triggerHaptic('tap');
-        $('text-query-input').value = '';
+        dom.queryInput.value = '';
         if ('speechSynthesis' in window) window.speechSynthesis.cancel();
         handleCommand(txt);
     };
 
     $('send-query-btn').addEventListener('click', submit);
-    $('text-query-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    dom.queryInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
 
+    // LAN Modal
     $('qr-connect-btn')?.addEventListener('click', openQRConnectModal);
-    $('close-qr-modal-btn')?.addEventListener('click', () => { if ($('qr-modal')) $('qr-modal').style.display = 'none'; });
+    $('close-qr-modal-btn')?.addEventListener('click', () => {
+        if ($('qr-modal')) $('qr-modal').style.display = 'none';
+    });
     $('copy-lan-url-btn')?.addEventListener('click', () => {
         triggerHaptic('tap');
         navigator.clipboard.writeText($('lan-url-text').textContent).then(() => showToast("LAN URL Copied!"));
     });
 
+    // PWA & iOS Modals
     $('install-pwa-btn')?.addEventListener('click', handleInstallClick);
     $('pwa-banner-install')?.addEventListener('click', handleInstallClick);
     $('pwa-banner-dismiss')?.addEventListener('click', () => {
@@ -752,7 +1146,49 @@ async function openQRConnectModal() {
     const img = new Image(180, 180);
     img.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(url)}&margin=2`;
     img.alt = "Scan with phone camera";
-    img.onerror = () => { box.innerHTML = `<div style="font-family:monospace;font-size:11px;color:#09090e;padding:8px;">${url}</div>`; };
+    img.onerror = () => {
+        box.innerHTML = `<div style="font-family:monospace;font-size:11px;color:#09090e;padding:8px;">${url}</div>`;
+    };
     box.appendChild(img);
     if ($('qr-modal')) $('qr-modal').style.display = 'flex';
 }
+
+/* ==========================================================================
+   INITIALIZATION
+   ========================================================================== */
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Cache DOM
+    dom = {
+        orb: $('martha-orb'),
+        statusLabel: $('agent-status-label'),
+        statusDot: $('agent-status-indicator'),
+        waveform: $('waveform'),
+        waveformBars: document.querySelectorAll('#waveform .bar'),
+        transcript: $('live-transcript'),
+        micBtn: $('mic-trigger-btn'),
+        muteBtn: $('mute-voice-btn'),
+        chatMessages: $('chat-messages'),
+        queryInput: $('text-query-input'),
+        voiceSelect: $('voice-select'),
+        wakeWordCheck: $('wake-word-enabled')
+    };
+
+    initSettingsUI();
+    initSpeechSynthesis();
+    initSpeechRecognition();
+    initPwaHooks();
+    bindUIEvents();
+
+    const mode = new URLSearchParams(window.location.search).get('mode');
+    if (mode === 'voice') setTimeout(() => triggerActivation(), 600);
+    else if (mode === 'search') switchMobileTab('research');
+
+    const browserPrompt = isSpeechRecognitionSupported
+        ? "Say 'Martha', tap the orb, or click the mic to start."
+        : "Tap the glowing orb or mic button to speak with Martha.";
+    addSystemMessage(`Martha initialized with female voice. ${browserPrompt}`);
+
+    // Heartbeat ping
+    setInterval(() => fetch(getApiUrl('/api/heartbeat')).catch(() => {}), 5000);
+});

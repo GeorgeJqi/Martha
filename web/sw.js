@@ -2,12 +2,12 @@
    MARTHA - SERVICE WORKER (PWA & OFFLINE CACHE)
    ========================================================================== */
 
-const CACHE_NAME = 'martha-pwa-v3.1';
+const CACHE_NAME = 'martha-pwa-v3.2';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
-    './index.css?v=3.1',
-    './app.js?v=3.1',
+    './index.css?v=3.2',
+    './app.js?v=3.2',
     './manifest.json',
     './icons/icon-192.png',
     './icons/icon-512.png',
