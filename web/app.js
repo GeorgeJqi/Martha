@@ -1,16 +1,39 @@
 /* ==========================================================================
-   MARTHA - OPTIMIZED CLIENT ENGINE (v3.2)
+   MARTHA - CLIENT ENGINE (v3.3)
    Multi-Platform Voice AI Assistant, Web Research & Universal Speech Engine
-   Cross-Browser Support: Firefox, Safari, Chrome, Edge & Mobile
+   Compatible with: Chromium (Chrome, Brave, Edge), Firefox, Safari, iOS & Android
    ========================================================================== */
 
+// Service Worker Registration
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js?v=3.2').catch(() => {});
+        navigator.serviceWorker.register('./sw.js?v=3.3')
+            .then(() => console.log('[Martha SW] Service worker registered successfully.'))
+            .catch(err => console.warn('[Martha SW] Service worker registration failed:', err));
     });
 }
 
-// Configuration Schema & Local Persistence
+// Safe Storage Helpers (Protects against Incognito / Strict Privacy Storage exceptions)
+const memoryStorage = {};
+function safeStorageGet(key, defValue = null) {
+    try {
+        const val = localStorage.getItem(key);
+        return val !== null ? val : defValue;
+    } catch (e) {
+        return key in memoryStorage ? memoryStorage[key] : defValue;
+    }
+}
+
+function safeStorageSet(key, value) {
+    try {
+        localStorage.setItem(key, value);
+    } catch (e) {
+        console.warn(`[Martha Storage] LocalStorage write blocked, using memory fallback for '${key}'.`);
+    }
+    memoryStorage[key] = value;
+}
+
+// Configuration Schema
 const SETTINGS_KEYS = {
     serverUrl: ['martha_server_url', ''],
     apiKey: ['martha_api_key', ''],
@@ -28,11 +51,11 @@ const SETTINGS_KEYS = {
 
 const settings = {};
 for (const [k, [sk, def, parse]] of Object.entries(SETTINGS_KEYS)) {
-    const raw = localStorage.getItem(sk);
+    const raw = safeStorageGet(sk, null);
     settings[k] = raw !== null ? (parse ? parse(raw) : raw) : def;
 }
 
-// DOM Cache
+// DOM Cache & Helpers
 const $ = (id) => document.getElementById(id);
 let dom = {};
 
@@ -41,10 +64,11 @@ let appState = 'sleeping';
 let recognition = null;
 let isRecognitionActive = false;
 let isSpeechRecognitionSupported = false;
+let speechRecognitionFailsafe = false;
 let synthVoices = [];
 let ttsKeepAliveTimer = null;
 
-// Universal Audio Capture (Firefox & Safari PCM Recorder)
+// Universal Audio Capture (Chromium / Firefox / Safari PCM Engine)
 let audioCtx = null;
 let micStream = null;
 let audioAnalyser = null;
@@ -69,7 +93,7 @@ let currentMobileTab = 'voice';
 
 const getApiUrl = (ep) => settings.serverUrl ? `${settings.serverUrl.replace(/\/+$/, '')}/${ep.replace(/^\/+/, '')}` : ep;
 
-// Female Voice Identification Regex
+// Female Voice Regex Pattern
 const FEMALE_VOICE_REGEX = /(female|woman|girl|samantha|zira|jenny|aria|eva|karen|victoria|ava|allison|sonia|moira|tessa|fiona|veena|natasha|libby|neerja|clara|emma|catherine|stephanie|sarah|julie|paulina|helena|hortense|hedda|hazel|google\s+uk\s+english\s+female|google\s+us\s+english|en-us-standard-[cdef]|en-us-wavenet-[cdef]|en-us-neural2-[cdef]|en-gb-x-rjs#female_1-local|en-us-x-sfg#female_1-local|f3|f4|f5)/i;
 
 /* ==========================================================================
@@ -81,7 +105,9 @@ function unlockAudio() {
     isAudioUnlocked = true;
     const ctx = getAudioContext();
     if (ctx && ctx.state === 'suspended') {
-        ctx.resume().catch(() => {});
+        ctx.resume().then(() => {
+            console.log('[Martha Audio] AudioContext resumed by user gesture.');
+        }).catch(() => {});
     }
     if ('speechSynthesis' in window) {
         try {
@@ -135,7 +161,9 @@ function playChime(type) {
             osc.start(st);
             osc.stop(st + 0.22);
         });
-    } catch (e) {}
+    } catch (e) {
+        console.warn('[Martha Audio] Chime playback skipped:', e);
+    }
 }
 
 /* ==========================================================================
@@ -143,7 +171,10 @@ function playChime(type) {
    ========================================================================== */
 
 async function requestMicPermission() {
-    if (!navigator.mediaDevices?.getUserMedia) return false;
+    if (!navigator.mediaDevices?.getUserMedia) {
+        console.warn('[Martha Audio] getUserMedia is not supported in this browser environment.');
+        return false;
+    }
     try {
         if (!micStream || !micStream.active) {
             micStream = await navigator.mediaDevices.getUserMedia({
@@ -153,6 +184,7 @@ async function requestMicPermission() {
         }
         return true;
     } catch (e) {
+        console.warn('[Martha Audio] Microphone permission request error:', e);
         return false;
     }
 }
@@ -170,7 +202,9 @@ function connectStreamToVisualizer(stream) {
             audioDataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
         }
         startVisualizerLoop();
-    } catch (e) {}
+    } catch (e) {
+        console.warn('[Martha Audio] Visualizer stream connection error:', e);
+    }
 }
 
 function startVisualizerLoop() {
@@ -183,7 +217,6 @@ function stopVisualizerLoop() {
         cancelAnimationFrame(visualizerAnimId);
         visualizerAnimId = null;
     }
-    // Reset waveform bars to idle state
     if (dom.waveformBars) {
         for (let i = 0; i < dom.waveformBars.length; i++) {
             dom.waveformBars[i].style.height = '4px';
@@ -211,7 +244,7 @@ function renderVisualizer() {
 }
 
 /* ==========================================================================
-   TEXT-TO-SPEECH (Female Voice Engine & Freeze Workaround)
+   TEXT-TO-SPEECH (Female Voice Engine & Freeze Prevention)
    ========================================================================== */
 
 function scoreVoice(v) {
@@ -234,15 +267,16 @@ function isVoiceFemale(v) {
 }
 
 function initSpeechSynthesis() {
-    if (!('speechSynthesis' in window)) return;
+    if (!('speechSynthesis' in window)) {
+        console.warn('[Martha TTS] SpeechSynthesis API not supported in this browser.');
+        return;
+    }
 
     const loadVoices = () => {
         synthVoices = window.speechSynthesis.getVoices();
         if (!synthVoices.length || !dom.voiceSelect) return;
 
-        // Sort voices: female & English voices first
         const sorted = [...synthVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
-
         dom.voiceSelect.innerHTML = '';
         let matchedOption = false;
 
@@ -259,12 +293,11 @@ function initSpeechSynthesis() {
             dom.voiceSelect.appendChild(opt);
         });
 
-        // Default to best female voice if none selected
         if (!matchedOption && sorted.length > 0) {
             const bestFemale = sorted.find(v => isVoiceFemale(v)) || sorted[0];
             dom.voiceSelect.value = bestFemale.name;
             settings.voiceName = bestFemale.name;
-            localStorage.setItem(SETTINGS_KEYS.voiceName[0], bestFemale.name);
+            safeStorageSet(SETTINGS_KEYS.voiceName[0], bestFemale.name);
         }
     };
 
@@ -272,6 +305,9 @@ function initSpeechSynthesis() {
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
         window.speechSynthesis.onvoiceschanged = loadVoices;
     }
+    // Chromium async voice discovery retry
+    setTimeout(loadVoices, 150);
+    setTimeout(loadVoices, 600);
 }
 
 function getSelectedFemaleVoice() {
@@ -280,7 +316,6 @@ function getSelectedFemaleVoice() {
         const found = synthVoices.find(x => x.name === settings.voiceName);
         if (found) return found;
     }
-    // Fallback to highest scored female voice
     const sorted = [...synthVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
     return sorted.find(v => isVoiceFemale(v)) || sorted[0] || null;
 }
@@ -303,7 +338,7 @@ function speakText(text) {
         setAgentState('speaking');
         const utt = new SpeechSynthesisUtterance(clean);
         utt.rate = settings.speechRate || 1.0;
-        utt.pitch = settings.speechPitch || 1.06; // Warm feminine pitch
+        utt.pitch = settings.speechPitch || 1.06;
 
         const femaleVoice = getSelectedFemaleVoice();
         if (femaleVoice) utt.voice = femaleVoice;
@@ -316,7 +351,7 @@ function speakText(text) {
             } else {
                 clearInterval(ttsKeepAliveTimer);
             }
-        }, 8000);
+        }, 7000);
 
         utt.onend = () => {
             clearInterval(ttsKeepAliveTimer);
@@ -324,8 +359,9 @@ function speakText(text) {
             setAgentState('sleeping');
         };
 
-        utt.onerror = () => {
+        utt.onerror = (e) => {
             clearInterval(ttsKeepAliveTimer);
+            console.warn('[Martha TTS] Browser SpeechSynthesis error, falling back to backend TTS:', e);
             fallbackBackendTTS(clean);
         };
 
@@ -342,15 +378,22 @@ function fallbackBackendTTS(text) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
     })
+    .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+    })
     .then(() => {
         playChime('success');
         setAgentState('sleeping');
     })
-    .catch(() => setAgentState('sleeping'));
+    .catch(err => {
+        console.warn('[Martha TTS] Backend TTS request failed:', err);
+        setAgentState('sleeping');
+    });
 }
 
 /* ==========================================================================
-   CROSS-BROWSER AUDIO RECORDER (16kHz PCM WAV for Firefox/Safari STT)
+   CROSS-BROWSER AUDIO RECORDER (16kHz PCM WAV for Chromium/Firefox/Safari)
    ========================================================================== */
 
 function encodeWAV(samples, sampleRate = 16000) {
@@ -367,13 +410,13 @@ function encodeWAV(samples, sampleRate = 16000) {
     view.setUint32(4, 36 + samples.length * 2, true);
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
-    view.setUint32(16, 16, true);                         // Subchunk1Size
-    view.setUint16(20, 1, true);                          // AudioFormat (PCM = 1)
-    view.setUint16(22, 1, true);                          // NumChannels (Mono = 1)
-    view.setUint32(24, sampleRate, true);                 // SampleRate (16000)
-    view.setUint32(28, sampleRate * 2, true);             // ByteRate (16000 * 2)
-    view.setUint16(32, 2, true);                          // BlockAlign (1 * 16 / 8)
-    view.setUint16(34, 16, true);                         // BitsPerSample (16 bits)
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
     writeString(36, 'data');
     view.setUint32(40, samples.length * 2, true);
 
@@ -429,7 +472,6 @@ async function startUniversalPcmCapture() {
             pcmSourceNode = ctx.createMediaStreamSource(micStream);
         }
 
-        // ScriptProcessorNode for universal cross-browser raw sample capture
         if (!pcmProcessor) {
             pcmProcessor = ctx.createScriptProcessor(4096, 1, 1);
         }
@@ -441,21 +483,21 @@ async function startUniversalPcmCapture() {
             pcmRecordedBuffers.push(new Float32Array(downsampled));
             pcmRecordingLength += downsampled.length;
 
-            // RMS-based Voice Activity Detection (VAD)
+            // RMS-based Voice Activity Detection
             let sumSquare = 0;
             for (let i = 0; i < input.length; i++) {
                 sumSquare += input[i] * input[i];
             }
             const rms = Math.sqrt(sumSquare / input.length);
 
-            if (rms > 0.025) {
+            if (rms > 0.022) {
                 vadSpeechDetected = true;
                 clearTimeout(vadSilenceTimer);
                 vadSilenceTimer = setTimeout(() => {
                     if (isPcmRecording && vadSpeechDetected) {
                         stopUniversalPcmCapture();
                     }
-                }, 1400); // 1.4s of silence after speech ends recording
+                }, 1300);
             }
         };
 
@@ -468,9 +510,10 @@ async function startUniversalPcmCapture() {
         clearTimeout(maxRecordTimer);
         maxRecordTimer = setTimeout(() => {
             if (isPcmRecording) stopUniversalPcmCapture();
-        }, 9000); // 9s max recording duration
+        }, 9000);
 
     } catch (e) {
+        console.error('[Martha Audio] startUniversalPcmCapture error:', e);
         showToast("Audio capture error");
         setAgentState('sleeping');
     }
@@ -493,12 +536,10 @@ function stopUniversalPcmCapture() {
     updateMicUI();
 
     if (!pcmRecordedBuffers.length || pcmRecordingLength < 1600) {
-        // Less than 0.1s of audio
         setAgentState('sleeping');
         return;
     }
 
-    // Merge Float32Array chunks
     const merged = new Float32Array(pcmRecordingLength);
     let offset = 0;
     for (let i = 0; i < pcmRecordedBuffers.length; i++) {
@@ -529,18 +570,22 @@ async function processRecordedAudio(blob) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ audio: base64, mime: 'audio/wav', api_key: settings.apiKey })
-            }).then(r => r.json());
+            }).then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            });
 
             if (res?.text?.trim()) {
                 dom.transcript.innerHTML = `"${res.text.trim()}"`;
                 handleCommand(res.text.trim());
             } else {
-                dom.transcript.innerHTML = "No speech detected.";
+                dom.transcript.innerHTML = res?.error || "No speech detected.";
                 setTimeout(() => {
                     if (appState === 'thinking') setAgentState('sleeping');
                 }, 1800);
             }
         } catch (e) {
+            console.error('[Martha API] /api/transcribe failed:', e);
             dom.transcript.innerHTML = "Voice processing error.";
             setTimeout(() => {
                 if (appState === 'thinking') setAgentState('sleeping');
@@ -550,95 +595,127 @@ async function processRecordedAudio(blob) {
 }
 
 /* ==========================================================================
-   SPEECH RECOGNITION (Web Speech API for Chrome/Edge/Safari)
+   SPEECH RECOGNITION (Web Speech API with Graceful Chromium Fallback)
    ========================================================================== */
 
 function initSpeechRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
+    if (!SR || speechRecognitionFailsafe) {
         isSpeechRecognitionSupported = false;
+        console.log('[Martha Voice] Using universal 16kHz PCM audio engine.');
         return;
     }
     isSpeechRecognitionSupported = true;
-    recognition = new SR();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    try {
+        recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
 
-    recognition.onstart = () => {
-        isRecognitionActive = true;
-        updateMicUI();
-    };
+        recognition.onstart = () => {
+            isRecognitionActive = true;
+            updateMicUI();
+        };
 
-    recognition.onend = () => {
-        isRecognitionActive = false;
-        updateMicUI();
-        if (appState === 'listening' || (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking'))) {
-            setTimeout(() => {
-                if (appState === 'listening' || settings.wakeWordEnabled) startRecognition();
-            }, 200);
-        }
-    };
-
-    recognition.onerror = (e) => {
-        if (e.error === 'no-speech' || e.error === 'aborted') return;
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-            addSystemMessage("Microphone permission required. Tap the orb or mic to enable.");
-            settings.wakeWordEnabled = false;
-            if (dom.wakeWordCheck) dom.wakeWordCheck.checked = false;
-            if (appState === 'listening') setAgentState('sleeping');
-        }
-    };
-
-    recognition.onresult = (e) => {
-        let interim = '', final = '';
-        for (let i = e.resultIndex; i < e.results.length; ++i) {
-            if (e.results[i].isFinal) final += e.results[i][0].transcript;
-            else interim += e.results[i][0].transcript;
-        }
-        const text = (final || interim).trim();
-        if (!text) return;
-        const lower = text.toLowerCase();
-
-        if (/\b(stop|shut up|quiet|pause|silence|abort|enough)\b/.test(lower)) {
-            stopEverything();
-            dom.transcript.innerHTML = '"Stopped"';
-            showToast("Assistant Stopped");
-            return;
-        }
-
-        if (appState === 'speaking') return;
-
-        if (appState === 'sleeping') {
-            const m = lower.match(/\b(martha|hey martha)\b/);
-            if (m) {
-                triggerHaptic('wake');
-                triggerActivation(text.substring(m.index + m[0].length).trim());
+        recognition.onend = () => {
+            isRecognitionActive = false;
+            updateMicUI();
+            if (appState === 'listening' || (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking'))) {
+                setTimeout(() => {
+                    if ((appState === 'listening' || settings.wakeWordEnabled) && isSpeechRecognitionSupported) {
+                        startRecognition();
+                    }
+                }, 250);
             }
-        } else if (appState === 'listening') {
-            dom.transcript.innerHTML = `"${text}"`;
-            const clean = text.replace(/\b(martha|hey martha)\b/gi, '').trim();
-            if (!clean) return;
-            clearTimeout(silenceTimer);
-            if (final.trim().length > 0) {
-                handleCommand(clean);
-            } else {
-                silenceTimer = setTimeout(() => {
-                    if (appState === 'listening') handleCommand(clean);
-                }, 1700);
+        };
+
+        recognition.onerror = (e) => {
+            if (e.error === 'no-speech' || e.error === 'aborted') return;
+            
+            // Chromium / Brave on Linux or non-Google builds where cloud recognition service is blocked
+            if (e.error === 'network' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
+                console.warn(`[Martha Voice] Speech recognition returned '${e.error}'. Switching to local PCM engine.`);
+                speechRecognitionFailsafe = true;
+                isSpeechRecognitionSupported = false;
+                stopRecognition();
+                if (appState === 'listening') {
+                    startUniversalPcmCapture();
+                }
+                return;
             }
-        }
-    };
+
+            if (e.error === 'not-allowed') {
+                console.warn('[Martha Voice] Microphone access denied.');
+                addSystemMessage("Microphone permission required. Tap the orb or mic to enable.");
+                settings.wakeWordEnabled = false;
+                if (dom.wakeWordCheck) dom.wakeWordCheck.checked = false;
+                if (appState === 'listening') setAgentState('sleeping');
+            }
+        };
+
+        recognition.onresult = (e) => {
+            let interim = '', final = '';
+            for (let i = e.resultIndex; i < e.results.length; ++i) {
+                if (e.results[i].isFinal) final += e.results[i][0].transcript;
+                else interim += e.results[i][0].transcript;
+            }
+            const text = (final || interim).trim();
+            if (!text) return;
+            const lower = text.toLowerCase();
+
+            if (/\b(stop|shut up|quiet|pause|silence|abort|enough)\b/.test(lower)) {
+                stopEverything();
+                dom.transcript.innerHTML = '"Stopped"';
+                showToast("Assistant Stopped");
+                return;
+            }
+
+            if (appState === 'speaking') return;
+
+            if (appState === 'sleeping') {
+                const m = lower.match(/\b(martha|hey martha)\b/);
+                if (m) {
+                    triggerHaptic('wake');
+                    triggerActivation(text.substring(m.index + m[0].length).trim());
+                }
+            } else if (appState === 'listening') {
+                dom.transcript.innerHTML = `"${text}"`;
+                const clean = text.replace(/\b(martha|hey martha)\b/gi, '').trim();
+                if (!clean) return;
+                clearTimeout(silenceTimer);
+                if (final.trim().length > 0) {
+                    handleCommand(clean);
+                } else {
+                    silenceTimer = setTimeout(() => {
+                        if (appState === 'listening') handleCommand(clean);
+                    }, 1700);
+                }
+            }
+        };
+    } catch (err) {
+        console.warn('[Martha Voice] Speech recognition initialization failed, fallback active:', err);
+        isSpeechRecognitionSupported = false;
+    }
 }
 
 function startRecognition() {
-    if (!recognition || isRecognitionActive) return;
-    try { recognition.start(); } catch (e) {}
+    if (!recognition || isRecognitionActive || !isSpeechRecognitionSupported) return;
+    try {
+        recognition.start();
+        isRecognitionActive = true;
+    } catch (e) {
+        if (e.name !== 'InvalidStateError') {
+            console.warn('[Martha Voice] recognition.start() error:', e);
+        }
+    }
 }
 
 function stopRecognition() {
-    if (recognition && isRecognitionActive) {
-        try { recognition.stop(); } catch (e) {}
+    if (recognition) {
+        try {
+            recognition.stop();
+        } catch (e) {}
+        isRecognitionActive = false;
     }
 }
 
@@ -676,7 +753,7 @@ async function triggerActivation(cmd = "") {
     const ok = await requestMicPermission();
     if (!ok) {
         showToast("Microphone access needed.");
-        dom.queryInput.focus();
+        dom.queryInput?.focus();
         setAgentState('sleeping');
         return;
     }
@@ -819,6 +896,7 @@ async function handleCommand(cmd) {
         dom.transcript.innerHTML = `"${ans}"`;
         speakText(ans);
     } catch (e) {
+        console.error('[Martha Agent] Command execution error:', e);
         const err = "Sorry, I couldn't fetch results right now. Please check backend connection.";
         addChatMessage(err, 'agent');
         speakText(err);
@@ -831,10 +909,12 @@ async function searchWeb(query) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
     } catch (e) {
+        console.warn('[Martha Search] Primary search API failed, trying fallback:', e);
         try {
             const ddg = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`).then(r => r.json());
             return ddg.AbstractText ? [{ title: ddg.Heading || query, url: ddg.AbstractURL || 'https://duckduckgo.com', snippet: ddg.AbstractText }] : [];
         } catch (err) {
+            console.error('[Martha Search] Web search unavailable:', err);
             return [];
         }
     }
@@ -849,23 +929,37 @@ async function generateAnswer(query, searchCtx) {
     const prompt = `Based on these search results, answer briefly in 2-3 sentences:\n${ctx || 'No live sources.'}\n\nQuestion: ${query}\nAnswer:`;
 
     if (settings.aiProvider === 'ollama') {
-        const res = await fetch(getApiUrl('/api/local-chat'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt, model: settings.ollamaModel, url: settings.ollamaUrl })
-        }).then(r => r.json());
-        return res.response?.trim() || "No response from local Ollama.";
+        try {
+            const res = await fetch(getApiUrl('/api/local-chat'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt, model: settings.ollamaModel, url: settings.ollamaUrl })
+            }).then(r => r.json());
+            return res.response?.trim() || "No response from local Ollama.";
+        } catch (e) {
+            console.error('[Martha AI] Ollama request failed:', e);
+            return "Could not connect to Ollama. Please ensure Ollama is running.";
+        }
     }
 
     if (settings.aiProvider === 'gemini') {
-        if (!settings.apiKey) return searchCtx[0] ? `According to web sources: "${searchCtx[0].snippet}".` : "No Gemini API key set.";
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 250, temperature: 0.4 } })
-        }).then(r => r.json());
-        return res.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Unable to generate answer.";
+        if (!settings.apiKey) return searchCtx[0] ? `According to web sources: "${searchCtx[0].snippet}".` : "No Gemini API key configured.";
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 250, temperature: 0.4 } })
+            }).then(r => r.json());
+            if (res.error) {
+                console.warn('[Martha AI] Gemini API error:', res.error);
+                return `Gemini API Error: ${res.error.message || 'Check API key'}`;
+            }
+            return res.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Unable to generate answer.";
+        } catch (e) {
+            console.error('[Martha AI] Gemini API network error:', e);
+            return "Network error connecting to Gemini API.";
+        }
     }
 
     if (settings.aiProvider === 'huggingface') {
@@ -875,13 +969,21 @@ async function generateAnswer(query, searchCtx) {
                 const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
                 env.allowLocalModels = false;
                 hfGenerator = await pipeline('text-generation', 'Xenova/Qwen1.5-0.5B-Chat');
+            } catch (e) {
+                console.error('[Martha AI] In-browser model load failed:', e);
+                return "Failed to load in-browser AI model. Check browser WebAssembly support.";
             } finally {
                 $('model-progress').style.display = 'none';
             }
         }
-        const res = await hfGenerator(`<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`, { max_new_tokens: 140 });
-        const text = res[0].generated_text.split('<|im_start|>assistant\n').pop() || '';
-        return text.replace(/<\|im_end\|>/g, '').trim() || searchCtx[0]?.snippet || "Processed.";
+        try {
+            const res = await hfGenerator(`<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`, { max_new_tokens: 140 });
+            const text = res[0].generated_text.split('<|im_start|>assistant\n').pop() || '';
+            return text.replace(/<\|im_end\|>/g, '').trim() || searchCtx[0]?.snippet || "Processed.";
+        } catch (e) {
+            console.error('[Martha AI] Model inference failed:', e);
+            return searchCtx[0]?.snippet || "Inference error.";
+        }
     }
     return searchCtx[0]?.snippet || "I processed your request.";
 }
@@ -1041,7 +1143,7 @@ function bindUIEvents() {
         settings.autoSpeakEnabled = $('auto-speak-enabled').checked;
 
         for (const [k, [sk]] of Object.entries(SETTINGS_KEYS)) {
-            localStorage.setItem(sk, settings[k]);
+            safeStorageSet(sk, settings[k]);
         }
 
         $('settings-drawer').classList.remove('open');
@@ -1083,7 +1185,7 @@ function bindUIEvents() {
     dom.muteBtn.addEventListener('click', () => {
         triggerHaptic('tap');
         settings.autoSpeakEnabled = !settings.autoSpeakEnabled;
-        localStorage.setItem(SETTINGS_KEYS.autoSpeakEnabled[0], settings.autoSpeakEnabled);
+        safeStorageSet(SETTINGS_KEYS.autoSpeakEnabled[0], settings.autoSpeakEnabled);
         $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
         updateMuteUI();
         if (!settings.autoSpeakEnabled && 'speechSynthesis' in window) {
@@ -1125,7 +1227,7 @@ function bindUIEvents() {
     $('pwa-banner-install')?.addEventListener('click', handleInstallClick);
     $('pwa-banner-dismiss')?.addEventListener('click', () => {
         if ($('pwa-install-banner')) $('pwa-install-banner').style.display = 'none';
-        sessionStorage.setItem('martha_pwa_dismissed', 'true');
+        try { sessionStorage.setItem('martha_pwa_dismissed', 'true'); } catch (e) {}
     });
     $('close-ios-modal-btn')?.addEventListener('click', () => {
         if ($('ios-install-modal')) $('ios-install-modal').style.display = 'none';
@@ -1138,7 +1240,9 @@ async function openQRConnectModal() {
     try {
         const info = await fetch(getApiUrl('/api/info')).then(r => r.json());
         if (info?.lan_url) url = info.lan_url;
-    } catch (e) {}
+    } catch (e) {
+        console.warn('[Martha API] /api/info fetch skipped, using origin:', e);
+    }
 
     $('lan-url-text').textContent = url;
     const box = $('qr-code-display');
@@ -1189,6 +1293,10 @@ document.addEventListener('DOMContentLoaded', () => {
         : "Tap the glowing orb or mic button to speak with Martha.";
     addSystemMessage(`Martha initialized with female voice. ${browserPrompt}`);
 
-    // Heartbeat ping
-    setInterval(() => fetch(getApiUrl('/api/heartbeat')).catch(() => {}), 5000);
+    // Heartbeat ping with structured logging
+    setInterval(() => {
+        fetch(getApiUrl('/api/heartbeat'))
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+            .catch(err => console.debug('[Martha Heartbeat] Server unreachable:', err.message));
+    }, 5000);
 });
