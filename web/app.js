@@ -45,6 +45,7 @@ const SETTINGS_KEYS = {
     soundEffectsEnabled: ['martha_sound_effects', true, v => v !== 'false'],
     autoSpeakEnabled: ['martha_auto_speak', true, v => v !== 'false'],
     aiProvider: ['martha_ai_provider', 'local'],
+    searchEngine: ['martha_search_engine', 'duckduckgo'],
     ollamaModel: ['martha_ollama_model', 'llama3.2'],
     ollamaUrl: ['martha_ollama_url', 'http://localhost:11434']
 };
@@ -911,8 +912,25 @@ async function searchWeb(query) {
     } catch (e) {
         console.warn('[Martha Search] Primary search API failed, trying fallback:', e);
         try {
-            const ddg = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`).then(r => r.json());
-            return ddg.AbstractText ? [{ title: ddg.Heading || query, url: ddg.AbstractURL || 'https://duckduckgo.com', snippet: ddg.AbstractText }] : [];
+            const engine = settings.searchEngine || 'duckduckgo';
+            let results = [];
+            if (engine === 'startpage') {
+                const sr = await fetch(`https://api.startpage.com/query?query=${encodeURIComponent(query)}&cmd=results&count=8`).then(r => r.json());
+                if (sr.Results) results = sr.Results.map((r, i) => ({ title: r.Title, url: r.URL, snippet: r.Snippet })).filter(r => r.title);
+            } else if (engine === 'google') {
+                const gd = await fetch(`https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`).then(r => r.text());
+                const titleMatches = gd.match(/<h3[^>]*>([^<]+)<\/h3>/g) || [];
+                const urlMatches = gd.match(/<a href="\/url\?q=([^"]+)"[^>]*>/g) || [];
+                for (let i = 0; i < titleMatches.length && i < urlMatches.length; i++) {
+                    const title = titleMatches[i].replace(/<[^>]+>/g, '').trim();
+                    const url = urlMatches[i].replace('/url?q=', '').split('&sa=U')[0] || '';
+                    if (title && url) results.push({ title, url, snippet: '' });
+                }
+            } else {
+                const ddg = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`).then(r => r.json());
+                results = ddg.AbstractText ? [{ title: ddg.Heading || query, url: ddg.AbstractURL || 'https://duckduckgo.com', snippet: ddg.AbstractText }] : [];
+            }
+            return results;
         } catch (err) {
             console.error('[Martha Search] Web search unavailable:', err);
             return [];
@@ -1108,6 +1126,7 @@ function initSettingsUI() {
     if ($('haptics-enabled')) $('haptics-enabled').checked = settings.hapticsEnabled;
     $('sound-effects-enabled').checked = settings.soundEffectsEnabled;
     $('auto-speak-enabled').checked = settings.autoSpeakEnabled;
+    $('search-engine').value = settings.searchEngine;
     toggleAIProviderFields();
     updateMuteUI();
 }
@@ -1141,6 +1160,7 @@ function bindUIEvents() {
         settings.hapticsEnabled = $('haptics-enabled')?.checked ?? true;
         settings.soundEffectsEnabled = $('sound-effects-enabled').checked;
         settings.autoSpeakEnabled = $('auto-speak-enabled').checked;
+        settings.searchEngine = $('search-engine').value;
 
         for (const [k, [sk]] of Object.entries(SETTINGS_KEYS)) {
             safeStorageSet(sk, settings[k]);
@@ -1174,7 +1194,6 @@ function bindUIEvents() {
         }
     };
 
-    dom.micBtn.addEventListener('click', toggleVoice);
     dom.orb.addEventListener('click', toggleVoice);
 
     $('stop-speaking-btn')?.addEventListener('click', () => {
@@ -1270,7 +1289,6 @@ document.addEventListener('DOMContentLoaded', () => {
         waveform: $('waveform'),
         waveformBars: document.querySelectorAll('#waveform .bar'),
         transcript: $('live-transcript'),
-        micBtn: $('mic-trigger-btn'),
         muteBtn: $('mute-voice-btn'),
         chatMessages: $('chat-messages'),
         queryInput: $('text-query-input'),

@@ -118,9 +118,6 @@
                 </div>
 
                 <div class="control-actions">
-                    <button id="mic-trigger-btn" class="action-btn mic-btn" title="Click or tap to speak">
-                        <i class="fa-solid fa-microphone"></i>
-                    </button>
                     <button id="stop-speaking-btn" class="action-btn stop-btn" title="Stop Assistant (or say 'Stop')">
                         <i class="fa-solid fa-square"></i>
                     </button>
@@ -197,13 +194,25 @@
                 <span class="help-text" id="hf-help-text" style="display: none;">Downloads a ~350MB ONNX model file into your browser cache on first use.</span>
             </div>
 
-            <div class="setting-group" id="gemini-key-group" style="display: none;">
+<div class="setting-group" id="gemini-key-group" style="display: none;">
                 <label for="gemini-api-key">Gemini API Key</label>
                 <div class="input-with-icon">
                     <i class="fa-solid fa-key"></i>
                     <input type="password" id="gemini-api-key" placeholder="AIzaSy...">
                 </div>
                 <span class="help-text">Direct browser LLM connection. Obtain a free key in <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>. Saved locally.</span>
+            </div>
+
+            <div class="setting-group">
+                <label for="search-engine">Web Search Engine</label>
+                <div class="select-wrapper">
+                    <select id="search-engine">
+                        <option value="duckduckgo" selected>DuckDuckGo (Default)</option>
+                        <option value="startpage">Startpage</option>
+                        <option value="google">Google</option>
+                    </select>
+                </div>
+                <span class="help-text">Choose which search engine Martha uses for web searches.</span>
             </div>
 
             <div class="setting-group" id="ollama-model-group" style="display: none;">
