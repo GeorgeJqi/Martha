@@ -1,6 +1,6 @@
 # Martha — Android & iOS Mobile Guide
 
-Martha can run on your smartphone or tablet (**Android** & **iOS**) with full offline/local voice support, responsive cybernetic UI, tactile haptics, and automated web research.
+Martha can run on your smartphone or tablet (**Android** & **iOS**) with full offline/local voice support, the open low-light interface, tactile haptics, and automated web research.
 
 ---
 
@@ -37,10 +37,10 @@ Run Martha's backend on your PC, Mac, or home server and interact with it from a
      MARTHA VOICE AI ASSISTANT — MULTI-PLATFORM SERVER
    ================================================================
      Desktop Access : http://localhost:8000
-     Mobile (Wi-Fi) : http://192.168.1.150:8000
+     Mobile (Wi-Fi) : http://<YOUR_LAN_IP>:8000
    ================================================================
    ```
-3. On your Android or iPhone, connect to the same Wi-Fi network and open `http://192.168.1.150:8000` (or tap **"Mobile Connect"** in the desktop web UI to scan the instant QR code with your camera).
+3. On your Android or iPhone, connect to the same Wi-Fi network and open `http://<YOUR_LAN_IP>:8000` (or tap **Mobile** in the desktop web UI to scan the instant QR code with your camera).
 4. Both devices will stay in sync!
 
 ---
@@ -84,7 +84,7 @@ npx cap open ios        # Opens Xcode (Build to iPhone / iPad)
 
 ## Mobile Tips & Features
 
-- **Tap-to-Talk Orb**: Tap the central glowing orb or the microphone button anytime to start voice input.
+- **Tap-to-Talk Orb**: Tap the central amber orb or the microphone button anytime to start voice input.
 - **Mobile Tabs**: Easily switch between **Voice Orb**, **Session Chat**, **Web Research**, and **Settings** using the bottom navigation bar.
 - **Haptic Feedback**: Enjoy tactile vibration pulses on Android and iOS when activating the mic or completing research.
 - **Safe Area Insets**: Native notch and home indicator support for all modern iPhone and Android edge-to-edge displays.

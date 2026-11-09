@@ -2,13 +2,16 @@
    MARTHA - SERVICE WORKER (PWA & OFFLINE CACHE)
    ========================================================================== */
 
-const CACHE_NAME = 'martha-pwa-v3.3';
+const CACHE_NAME = 'martha-pwa-v4.1';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
-    './index.css?v=3.3',
-    './app.js?v=3.3',
+    './index.css?v=4.1',
+    './base.css',
+    './tokens.css',
+    './app.js?v=4.1',
     './manifest.json',
+    './background.jpg',
     './icons/icon-192.png',
     './icons/icon-512.png',
     './icons/apple-touch-icon.png',
@@ -20,7 +23,13 @@ const ASSETS_TO_CACHE = [
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(ASSETS_TO_CACHE);
+            // Cache each asset on its own so an optional file, such as the
+            // background photograph, cannot block the whole install.
+            return Promise.all(
+                ASSETS_TO_CACHE.map((asset) =>
+                    cache.add(asset).catch(() => null)
+                )
+            );
         }).then(() => self.skipWaiting())
     );
 });

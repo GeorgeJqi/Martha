@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Martha — Voice AI Assistant</title>
-    
+    <title>Martha, voice assistant</title>
+
     <!-- Mobile & PWA Meta Tags -->
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Martha">
-    <meta name="theme-color" content="#09090e">
-    <meta name="description" content="Martha is an open-source, local voice AI assistant and automated web research agent for Desktop, Android, and iOS.">
+    <meta name="theme-color" content="#0d1015">
+    <meta name="description" content="Martha is a local voice AI assistant that answers questions and reads the web for you.">
 
     <!-- Icons and Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -20,330 +20,323 @@
     <link rel="icon" type="image/png" sizes="64x64" href="icons/favicon.png">
     <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
 
-    <!-- Google Fonts -->
+    <!-- Type -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    
-    <!-- FontAwesome for Premium Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Instrument+Sans:wght@400;500&display=swap" rel="stylesheet">
+
+    <!-- Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
+
     <!-- Main Style Sheet -->
-    <link rel="stylesheet" href="index.css?v=3.3">
+    <link rel="stylesheet" href="index.css?v=4.1">
 </head>
 <body>
-    <div class="glass-bg"></div>
-    <div class="glow-orb glow-orb-1"></div>
-    <div class="glow-orb glow-orb-2"></div>
+    <div class="scene" aria-hidden="true"></div>
+    <noscript>
+        <p class="noscript-note">Martha needs JavaScript for voice, search and replies. The interface is here, but the assistant cannot run without it.</p>
+    </noscript>
 
     <div class="app-container">
-        <!-- Main Layout Header -->
         <header class="app-header">
             <div class="brand">
-                <i class="fa-solid fa-wand-magic-sparkles logo-icon"></i>
-                <h1>MARTHA</h1>
-                <span class="badge mobile-hidden">v1.1 AI Agent</span>
+                <span class="brand-mark" aria-hidden="true"></span>
+                <h1>Martha</h1>
+                <span id="engine-badge" class="badge">local</span>
             </div>
             <div class="header-actions">
-                <button id="qr-connect-btn" class="header-pill-btn" title="Connect Phone / QR Code">
-                    <i class="fa-solid fa-mobile-screen"></i>
-                    <span class="btn-label">Mobile Connect</span>
+                <button id="qr-connect-btn" class="header-btn" type="button" title="Connect a phone">
+                    <i class="fa-solid fa-mobile-screen" aria-hidden="true"></i>
+                    <span class="btn-label">Mobile</span>
                 </button>
-                <button id="install-pwa-btn" class="header-pill-btn pwa-header-btn" title="Install App" style="display: none;">
-                    <i class="fa-solid fa-download"></i>
-                    <span class="btn-label">Install App</span>
+                <button id="install-pwa-btn" class="header-btn pwa-header-btn" type="button" title="Install app" style="display: none;">
+                    <i class="fa-solid fa-download" aria-hidden="true"></i>
+                    <span class="btn-label">Install</span>
                 </button>
-                <button id="toggle-settings-btn" class="icon-btn" title="Open Settings">
-                    <i class="fa-solid fa-sliders"></i>
+                <button id="toggle-settings-btn" class="icon-btn" type="button" title="Settings" aria-label="Open settings">
+                    <i class="fa-solid fa-sliders" aria-hidden="true"></i>
                 </button>
             </div>
         </header>
 
         <main class="app-main" id="app-main">
-            <!-- Left Side: Chat log & history -->
-            <section class="panel chat-panel" id="panel-chat">
+            <!-- Conversation -->
+            <section class="panel chat-panel" id="panel-chat" aria-labelledby="chat-title">
                 <div class="panel-header">
-                    <h2><i class="fa-solid fa-message-captions"></i> Session Log</h2>
-                    <button id="clear-chat-btn" class="text-btn" title="Clear Conversations">Clear</button>
+                    <h2 id="chat-title">Conversation</h2>
+                    <button id="clear-chat-btn" class="text-btn" type="button" title="Clear conversation">Clear</button>
                 </div>
-                <div id="chat-messages" class="chat-messages">
-                    <div class="system-message">
-                        <p>Martha is initialized. Wake word is active. Say <strong>"Martha"</strong> or tap the orb / mic button to speak.</p>
-                    </div>
-                </div>
-                <div class="text-input-container">
-                    <input type="text" id="text-query-input" placeholder="Type a message or call 'Martha'..." autocomplete="off">
-                    <button id="send-query-btn" class="send-btn" title="Send message"><i class="fa-solid fa-arrow-up"></i></button>
+                <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Conversation history"></div>
+                <div class="composer">
+                    <label class="visually-hidden" for="text-query-input">Type a message</label>
+                    <input type="text" id="text-query-input" name="message" placeholder="Type a message" autocomplete="off" enterkeyhint="send">
+                    <button id="send-query-btn" class="send-btn" type="button" title="Send message" aria-label="Send message">
+                        <i class="fa-solid fa-arrow-up" aria-hidden="true"></i>
+                    </button>
                 </div>
             </section>
 
-            <!-- Center: Voice Orb & Visualizer -->
-            <section class="panel visualizer-panel active-mobile-view" id="panel-voice">
+            <!-- Voice stage -->
+            <section class="panel visualizer-panel active-mobile-view" id="panel-voice" aria-labelledby="voice-title">
+                <h2 id="voice-title" class="visually-hidden">Voice</h2>
                 <div class="status-container">
-                    <span id="agent-status-label" class="status-label">Sleeping</span>
-                    <span id="agent-status-indicator" class="status-dot sleeping"></span>
+                    <span id="agent-status-indicator" class="status-dot sleeping" aria-hidden="true"></span>
+                    <span id="agent-status-label" class="status-label" role="status">sleeping</span>
                 </div>
 
                 <div class="orb-container">
-                    <!-- The Glowing Orb -->
-                    <div id="martha-orb" class="martha-orb state-sleeping" title="Tap to talk to Martha">
-                        <div class="spinner">
-                            <div class="spinner1"></div>
+                    <div id="martha-orb" class="martha-orb state-sleeping" role="button" tabindex="0" aria-label="Talk to Martha" title="Tap to talk to Martha">
+                        <span class="orb-ring" aria-hidden="true"></span>
+                        <span class="orb-core" aria-hidden="true"></span>
+                    </div>
+                </div>
+
+                <div class="stage-foot">
+                    <div class="waveform-container">
+                        <div id="waveform" class="waveform" aria-hidden="true">
+                            <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+                            <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+                            <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+                            <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+                            <span class="bar"></span><span class="bar"></span><span class="bar"></span>
                         </div>
                     </div>
-                </div>
 
-                <div class="waveform-container">
-                    <div id="waveform" class="waveform">
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
-                        <span class="bar"></span>
+                    <p id="live-transcript" class="live-transcript" aria-live="polite">Say “Martha” or tap the orb to speak.</p>
+
+                    <div class="control-actions">
+                        <button id="stop-speaking-btn" class="action-btn stop-btn" type="button" title="Stop assistant" aria-label="Stop assistant">
+                            <i class="fa-solid fa-square" aria-hidden="true"></i>
+                        </button>
+                        <button id="mute-voice-btn" class="action-btn mute-btn" type="button" title="Mute speech" aria-label="Mute speech">
+                            <i class="fa-solid fa-volume-high" aria-hidden="true"></i>
+                        </button>
                     </div>
-                </div>
-
-                <div class="transcript-preview">
-                    <p id="live-transcript" class="live-transcript">"Martha, what is..."</p>
-                </div>
-
-                <div class="control-actions">
-                    <button id="stop-speaking-btn" class="action-btn stop-btn" title="Stop Assistant (or say 'Stop')">
-                        <i class="fa-solid fa-square"></i>
-                    </button>
-                    <button id="mute-voice-btn" class="action-btn mute-btn" title="Mute Speech Synthesis">
-                        <i class="fa-solid fa-volume-high"></i>
-                    </button>
                 </div>
             </section>
 
-            <!-- Right Side: Web Search citations -->
-            <section class="panel citations-panel" id="panel-research">
+            <!-- Sources -->
+            <section class="panel citations-panel" id="panel-research" aria-labelledby="research-title">
                 <div class="panel-header">
-                    <h2><i class="fa-solid fa-magnifying-glass"></i> Web Research</h2>
-                    <span id="citation-count" class="badge">0 Results</span>
+                    <h2 id="research-title">Web research</h2>
+                    <span id="citation-count" class="badge">0 results</span>
                 </div>
                 <div id="search-citations" class="search-citations">
                     <div class="no-citations-message">
-                        <i class="fa-solid fa-globe"></i>
-                        <p>No active web search conducted yet.</p>
-                        <span>When Martha searches the web, raw sources will appear here.</span>
+                        <i class="fa-solid fa-globe" aria-hidden="true"></i>
+                        <p>No sources yet</p>
+                        <span>Ask something that needs the web and the pages Martha reads appear here.</span>
                     </div>
                 </div>
             </section>
         </main>
 
-        <!-- Mobile Bottom Navigation Bar (Visible on mobile/tablet) -->
-        <nav class="mobile-bottom-nav" id="mobile-bottom-nav">
-            <button class="mobile-nav-item active" data-tab="voice" id="tab-btn-voice">
-                <div class="nav-icon-wrapper"><i class="fa-solid fa-microphone-lines"></i></div>
-                <span>Voice Orb</span>
+        <!-- Mobile navigation -->
+        <nav class="mobile-bottom-nav" id="mobile-bottom-nav" aria-label="Sections">
+            <button class="mobile-nav-item active" data-tab="voice" id="tab-btn-voice" type="button">
+                <span class="nav-icon-wrapper"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i></span>
+                <span>Voice</span>
             </button>
-            <button class="mobile-nav-item" data-tab="chat" id="tab-btn-chat">
-                <div class="nav-icon-wrapper"><i class="fa-solid fa-message-captions"></i></div>
+            <button class="mobile-nav-item" data-tab="chat" id="tab-btn-chat" type="button">
+                <span class="nav-icon-wrapper"><i class="fa-solid fa-message-captions" aria-hidden="true"></i></span>
                 <span>Chat</span>
             </button>
-            <button class="mobile-nav-item" data-tab="research" id="tab-btn-research">
-                <div class="nav-icon-wrapper"><i class="fa-solid fa-globe"></i></div>
+            <button class="mobile-nav-item" data-tab="research" id="tab-btn-research" type="button">
+                <span class="nav-icon-wrapper"><i class="fa-solid fa-globe" aria-hidden="true"></i></span>
                 <span>Research</span>
             </button>
-            <button class="mobile-nav-item" data-tab="settings" id="tab-btn-settings">
-                <div class="nav-icon-wrapper"><i class="fa-solid fa-sliders"></i></div>
+            <button class="mobile-nav-item" data-tab="settings" id="tab-btn-settings" type="button">
+                <span class="nav-icon-wrapper"><i class="fa-solid fa-sliders" aria-hidden="true"></i></span>
                 <span>Settings</span>
             </button>
         </nav>
     </div>
 
-    <!-- Right Slide-out Drawer: Settings -->
-    <aside id="settings-drawer" class="settings-drawer">
+    <!-- Settings -->
+    <aside id="settings-drawer" class="settings-drawer" aria-labelledby="settings-title">
         <div class="drawer-header">
-            <h3>Configuration</h3>
-            <button id="close-settings-btn" class="icon-btn" title="Close"><i class="fa-solid fa-xmark"></i></button>
+            <h2 id="settings-title">Settings</h2>
+            <button id="close-settings-btn" class="icon-btn" type="button" title="Close settings" aria-label="Close settings">
+                <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+            </button>
         </div>
         <div class="drawer-content">
-            <!-- Mobile / Remote Server Connection -->
             <div class="setting-group">
-                <label for="server-url">Martha Backend Host (LAN / Remote)</label>
+                <label for="server-url">Backend host</label>
                 <div class="input-with-icon">
-                    <i class="fa-solid fa-network-wired"></i>
-                    <input type="text" id="server-url" placeholder="http://192.168.1.xxx:8000 (or leave empty for local)">
+                    <i class="fa-solid fa-network-wired" aria-hidden="true"></i>
+                    <input type="text" id="server-url" name="server-url" placeholder="http://YOUR-LAN-IP:8000">
                 </div>
-                <span class="help-text">For mobile devices on Wi-Fi connecting to your PC's Martha server.</span>
+                <span class="help-text">Leave empty to use this device. Set a LAN address when a phone connects to your computer.</span>
             </div>
 
             <div class="setting-group">
-                <label for="ai-provider">AI Engine Provider</label>
+                <label for="ai-provider">AI engine</label>
                 <div class="select-wrapper">
-                    <select id="ai-provider">
-                        <option value="local" selected>Instant Local Engine (Fast / No Download)</option>
-                        <option value="gemini">Google Gemini (Cloud API)</option>
-                        <option value="ollama">Ollama (Local Server)</option>
-                        <option value="huggingface">In-Browser LLM (Downloads ~350MB ONNX)</option>
+                    <select id="ai-provider" name="ai-provider">
+                        <option value="local" selected>Local, instant</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="ollama">Ollama on this machine</option>
+                        <option value="huggingface">In-browser model, 350 MB download</option>
                     </select>
                 </div>
-                <span class="help-text" id="hf-help-text" style="display: none;">Downloads a ~350MB ONNX model file into your browser cache on first use.</span>
+                <span class="help-text" id="hf-help-text" style="display: none;">Downloads a 350 MB model into this browser the first time it runs.</span>
             </div>
 
-<div class="setting-group" id="gemini-key-group" style="display: none;">
-                <label for="gemini-api-key">Gemini API Key</label>
+            <div class="setting-group" id="gemini-key-group" style="display: none;">
+                <label for="gemini-api-key">Gemini API key</label>
                 <div class="input-with-icon">
-                    <i class="fa-solid fa-key"></i>
-                    <input type="password" id="gemini-api-key" placeholder="AIzaSy...">
+                    <i class="fa-solid fa-key" aria-hidden="true"></i>
+                    <input type="password" id="gemini-api-key" name="gemini-api-key" placeholder="Paste your key" autocomplete="off">
                 </div>
-                <span class="help-text">Direct browser LLM connection. Obtain a free key in <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>. Saved locally.</span>
+                <span class="help-text">Get a free key at <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer">Google AI Studio</a>. Stored on this device.</span>
             </div>
 
             <div class="setting-group">
-                <label for="search-engine">Web Search Engine</label>
+                <label for="search-engine">Search engine</label>
                 <div class="select-wrapper">
-                    <select id="search-engine">
-                        <option value="duckduckgo" selected>DuckDuckGo (Default)</option>
+                    <select id="search-engine" name="search-engine">
+                        <option value="duckduckgo" selected>DuckDuckGo</option>
                         <option value="startpage">Startpage</option>
                         <option value="google">Google</option>
                     </select>
                 </div>
-                <span class="help-text">Choose which search engine Martha uses for web searches.</span>
+                <span class="help-text">Used when a question needs a live source.</span>
             </div>
 
             <div class="setting-group" id="ollama-model-group" style="display: none;">
-                <label for="ollama-model">Ollama Model</label>
+                <label for="ollama-model">Ollama model</label>
                 <div class="input-with-icon">
-                    <i class="fa-solid fa-brain"></i>
-                    <input type="text" id="ollama-model" placeholder="llama3.2">
+                    <i class="fa-solid fa-brain" aria-hidden="true"></i>
+                    <input type="text" id="ollama-model" name="ollama-model" placeholder="llama3.2">
                 </div>
-                <span class="help-text">Lightweight model name running in Ollama.</span>
+                <span class="help-text">The model running in Ollama.</span>
             </div>
 
             <div class="setting-group" id="ollama-url-group" style="display: none;">
-                <label for="ollama-url">Ollama Server URL</label>
+                <label for="ollama-url">Ollama address</label>
                 <div class="input-with-icon">
-                    <i class="fa-solid fa-server"></i>
-                    <input type="text" id="ollama-url" placeholder="http://localhost:11434">
+                    <i class="fa-solid fa-server" aria-hidden="true"></i>
+                    <input type="text" id="ollama-url" name="ollama-url" placeholder="http://localhost:11434">
                 </div>
             </div>
 
             <div class="setting-group">
-                <label for="voice-select">Speech Synthesis Voice (Female TTS)</label>
+                <label for="voice-select">Voice</label>
                 <div class="select-wrapper">
-                    <select id="voice-select">
-                        <option value="">Detecting female voices...</option>
+                    <select id="voice-select" name="voice-select">
+                        <option value="">Finding voices…</option>
                     </select>
                 </div>
-                <span class="help-text">Natural female voice auto-selected across Windows, Mac, Linux, iOS & Android.</span>
+                <span class="help-text">The most natural female voice on this device is chosen first.</span>
             </div>
 
             <div class="setting-group">
-                <label for="speech-rate">Voice Speed</label>
-                <input type="range" id="speech-rate" min="0.5" max="2" step="0.1" value="1.0">
+                <label for="speech-rate">Voice speed</label>
+                <input type="range" id="speech-rate" name="speech-rate" min="0.5" max="2" step="0.1" value="1.0">
                 <div class="range-labels">
-                    <span>0.5x</span>
-                    <span>1.0x</span>
-                    <span>2.0x</span>
+                    <span>0.5×</span>
+                    <span>1.0×</span>
+                    <span>2.0×</span>
                 </div>
             </div>
 
             <div class="setting-group checkbox-group">
-                <input type="checkbox" id="wake-word-enabled" checked>
-                <label for="wake-word-enabled">Continuous Wake Word ("Martha")</label>
+                <input type="checkbox" id="wake-word-enabled" name="wake-word-enabled" checked>
+                <label for="wake-word-enabled">Listen for “Martha”</label>
             </div>
 
             <div class="setting-group checkbox-group">
-                <input type="checkbox" id="haptics-enabled" checked>
-                <label for="haptics-enabled">Mobile Haptic Vibrations</label>
+                <input type="checkbox" id="haptics-enabled" name="haptics-enabled" checked>
+                <label for="haptics-enabled">Haptic feedback</label>
             </div>
 
             <div class="setting-group checkbox-group">
-                <input type="checkbox" id="sound-effects-enabled" checked>
-                <label for="sound-effects-enabled">Start / Finish Chimes</label>
+                <input type="checkbox" id="sound-effects-enabled" name="sound-effects-enabled" checked>
+                <label for="sound-effects-enabled">Start and finish chimes</label>
             </div>
 
             <div class="setting-group checkbox-group">
-                <input type="checkbox" id="auto-speak-enabled" checked>
-                <label for="auto-speak-enabled">Auto-speak Responses</label>
+                <input type="checkbox" id="auto-speak-enabled" name="auto-speak-enabled" checked>
+                <label for="auto-speak-enabled">Speak answers aloud</label>
             </div>
 
             <div class="settings-footer">
-                <button id="save-settings-btn" class="primary-btn">Save settings</button>
+                <button id="save-settings-btn" class="primary-btn" type="button">Save settings</button>
             </div>
         </div>
     </aside>
 
-    <!-- Modal: QR Code / Mobile LAN Connect -->
+    <!-- Phone pairing -->
     <div id="qr-modal" class="modal-backdrop" style="display: none;">
-        <div class="modal-card">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="qr-title">
             <div class="modal-header">
-                <h3><i class="fa-solid fa-mobile-screen-button"></i> Connect Android or iPhone</h3>
-                <button id="close-qr-modal-btn" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
+                <h3 id="qr-title">Connect a phone</h3>
+                <button id="close-qr-modal-btn" class="icon-btn" type="button" aria-label="Close">
+                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                </button>
             </div>
             <div class="modal-body">
-                <p class="modal-subtitle">Scan this QR code with your phone camera on your home Wi-Fi to launch Martha immediately on mobile:</p>
+                <p class="modal-subtitle">Scan this with a phone on the same Wi-Fi. Martha opens there, ready to listen.</p>
                 <div class="qr-canvas-container">
                     <div id="qr-code-display" class="qr-code-box"></div>
                 </div>
                 <div class="lan-url-box">
-                    <span id="lan-url-text">http://192.168.x.x:8000</span>
-                    <button id="copy-lan-url-btn" class="icon-btn" title="Copy LAN URL"><i class="fa-solid fa-copy"></i></button>
+                    <span id="lan-url-text">http://YOUR-LAN-IP:8000</span>
+                    <button id="copy-lan-url-btn" class="icon-btn" type="button" title="Copy address" aria-label="Copy address">
+                        <i class="fa-solid fa-copy" aria-hidden="true"></i>
+                    </button>
                 </div>
                 <div class="mobile-tips">
-                    <div class="tip-item"><i class="fa-brands fa-apple"></i> <strong>iOS Safari:</strong> Tap Share <i class="fa-solid fa-arrow-up-from-bracket"></i> → <em>Add to Home Screen</em></div>
-                    <div class="tip-item"><i class="fa-brands fa-android"></i> <strong>Android Chrome:</strong> Tap <i class="fa-solid fa-ellipsis-vertical"></i> → <em>Install App</em></div>
+                    <div class="tip-item"><i class="fa-brands fa-apple" aria-hidden="true"></i> iOS Safari: Share, then Add to Home Screen.</div>
+                    <div class="tip-item"><i class="fa-brands fa-android" aria-hidden="true"></i> Android Chrome: the menu, then Install app.</div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Modal: iOS Safari Install Instructions Guide -->
+    <!-- iPhone install -->
     <div id="ios-install-modal" class="modal-backdrop" style="display: none;">
-        <div class="modal-card">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ios-title">
             <div class="modal-header">
-                <h3><i class="fa-brands fa-apple"></i> Install Martha on iPhone & iPad</h3>
-                <button id="close-ios-modal-btn" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
+                <h3 id="ios-title">Install on iPhone or iPad</h3>
+                <button id="close-ios-modal-btn" class="icon-btn" type="button" aria-label="Close">
+                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                </button>
             </div>
             <div class="modal-body">
                 <ol class="ios-steps">
-                    <li>Tap the <strong>Share</strong> button <i class="fa-solid fa-arrow-up-from-bracket ios-share-icon"></i> at the bottom of Safari.</li>
-                    <li>Scroll down and select <strong>"Add to Home Screen"</strong> <i class="fa-solid fa-plus-square"></i>.</li>
-                    <li>Tap <strong>"Add"</strong> in the top right.</li>
+                    <li>Tap <strong>Share</strong> at the bottom of Safari.</li>
+                    <li>Choose <strong>Add to Home Screen</strong>.</li>
+                    <li>Tap <strong>Add</strong>.</li>
                 </ol>
-                <p class="ios-note">Martha will run like a native standalone app with zero address bars, offline caching, and instant launch!</p>
+                <p class="ios-note">Martha then opens full screen, with no address bar and an offline cache.</p>
             </div>
         </div>
     </div>
 
-    <!-- PWA Install Banner (Bottom Toast for Mobile Chrome/Edge/Firefox) -->
+    <!-- Install banner -->
     <div id="pwa-install-banner" class="pwa-banner" style="display: none;">
-        <img src="icons/icon-192.png" alt="Martha Logo" class="pwa-banner-icon">
+        <img src="icons/icon-192.png" alt="" width="40" height="40" class="pwa-banner-icon">
         <div class="pwa-banner-content">
-            <strong>Install Martha App</strong>
-            <span>Install on Android / iOS for offline voice AI</span>
+            <strong>Install Martha</strong>
+            <span>Opens full screen on this device.</span>
         </div>
         <div class="pwa-banner-actions">
-            <button id="pwa-banner-dismiss" class="text-btn">Later</button>
-            <button id="pwa-banner-install" class="primary-btn btn-sm">Install</button>
+            <button id="pwa-banner-dismiss" class="text-btn" type="button">Later</button>
+            <button id="pwa-banner-install" class="primary-btn btn-sm" type="button">Install</button>
         </div>
     </div>
 
-    <!-- Visual Status Notification -->
-    <div id="toast" class="toast">Settings Saved</div>
+    <div id="toast" class="toast" role="status" aria-live="polite">Settings saved</div>
 
-    <!-- Model download progress (shown during first-run HF model fetch) -->
     <div id="model-progress" class="model-progress" style="display: none;">
-        <div class="model-progress-text" id="model-progress-text">Downloading local AI model...</div>
+        <div class="model-progress-text" id="model-progress-text">Downloading the local model</div>
         <div class="model-progress-bar-bg">
             <div class="model-progress-bar" id="model-progress-bar"></div>
         </div>
     </div>
 
-    <script type="module" src="app.js?v=3.3"></script>
+    <script type="module" src="app.js?v=4.1"></script>
 </body>
 </html>

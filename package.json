@@ -1,6 +1,6 @@
 {
   "name": "martha-voice-ai",
-  "version": "1.1.0",
+  "version": "4.0.0",
   "description": "Cross-platform Local Voice AI Assistant and Web Research Agent",
   "private": true,
   "scripts": {

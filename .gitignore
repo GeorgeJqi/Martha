@@ -1,5 +1,57 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
 build/
 dist/
+.pytest_cache/
+.mypy_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets.*
+credentials.*
+martha.local.json
+
+# Node and Capacitor
+node_modules/
+android/
+ios/
+*.apk
+*.aab
+*.ipa
+.capacitor/
+
+# Runtime output
+*.log
+logs/
+recordings/
+*.wav
+*.mp3
+*.webm
+*.ogg
+.cache/
+tmp/
+
+# Design working files
+.hallmark/
+
+# Private imagery. Add your own web/background.jpg locally.
+background.jpg
+web/background.jpg
+
+# OS and editors
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

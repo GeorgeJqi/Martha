@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import time
+import shutil
 import socket
 import threading
 import subprocess
@@ -74,7 +75,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
             ip = get_lan_ip()
             return self.send_json({
                 "name": "Martha Voice AI",
-                "version": "1.2",
+                "version": "4.0",
                 "status": "online",
                 "lan_ip": ip,
                 "lan_url": f"http://{ip}:{PORT}",
@@ -194,43 +195,114 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         self.send_json({"status": "success"})
 
     def speak_text(self, text):
-        """Play female voice Text-To-Speech on the host operating system."""
-        clean = re.sub(r'["\'\\]', '', text)
-        if not clean: return
-        print(f"Female TTS ({sys.platform}): '{clean[:60]}...'")
+        """Speak in a warm, unhurried voice on the host operating system."""
+        clean = re.sub(r'https?://\S+', '', text)
+        clean = re.sub(r'["\'\\*_#`]', '', clean).strip()
+        if not clean:
+            return
+        print(f"Voice TTS ({sys.platform}): '{clean[:60]}...'")
+
+        if self._speak_with_piper(clean):
+            return
+
         try:
             if sys.platform == 'darwin':
-                # macOS: Prefer Samantha, Victoria, or Karen (female voices)
-                cmd = ['say', '-v', 'Samantha', clean]
-                subprocess.Popen(cmd)
+                voice = 'Samantha'
+                try:
+                    listing = subprocess.run(['say', '-v', '?'], capture_output=True, text=True, timeout=2).stdout
+                    for candidate in ('Ava (Premium)', 'Ava (Enhanced)', 'Samantha (Enhanced)',
+                                      'Allison (Enhanced)', 'Samantha', 'Victoria', 'Karen', 'Moira', 'Tessa'):
+                        if candidate in listing:
+                            voice = candidate
+                            break
+                except Exception:
+                    pass
+                subprocess.Popen(['say', '-v', voice, '-r', '178', clean])
             elif sys.platform == 'win32':
-                # Windows: Use SpeechSynthesizer with VoiceGender.Female
+                # Prefer a natural installed female voice, then fall back to the
+                # system female hint. Slightly slower and softer than default.
                 ps_script = (
-                    f"Add-Type -AssemblyName System.Speech; "
-                    f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                    f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
-                    f"$s.Rate = 0; "
+                    "Add-Type -AssemblyName System.Speech; "
+                    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                    "$names = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }; "
+                    "$wanted = @('Microsoft Aria Online (Natural) - English (United States)', "
+                    "'Microsoft Jenny Online (Natural) - English (United States)', "
+                    "'Microsoft Zira Desktop', 'Microsoft Hazel Desktop'); "
+                    "$pick = $wanted | Where-Object { $names -contains $_ } | Select-Object -First 1; "
+                    "if ($pick) { $s.SelectVoice($pick) } else { "
+                    "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female) }; "
+                    "$s.Rate = -1; $s.Volume = 95; "
                     f"$s.Speak('{clean}');"
                 )
                 subprocess.Popen(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
-                # Linux: Use female voice profile for spd-say / espeak
+                # Speech Dispatcher gives the cleanest Linux result. Ask for an
+                # English female voice, then slow it down and take the edge off
+                # the pitch. espeak on its own is a last resort.
                 linux_commands = [
-                    ['spd-say', '-t', 'female2', '-p', '10', '-r', '-5', clean],
-                    ['spd-say', '-t', 'female1', clean],
-                    ['espeak', '-v', 'en+f3', '-s', '155', '-p', '65', clean],
-                    ['espeak', '-v', 'f3', '-s', '155', clean],
-                    ['spd-say', clean]
+                    ['spd-say', '-l', 'en-US', '-t', 'female2', '-p', '-8', '-r', '-15', '-R', '10', clean],
+                    ['spd-say', '-l', 'en-US', '-t', 'female1', '-p', '-8', '-r', '-15', '-R', '10', clean],
+                    ['spd-say', '-l', 'en-GB', '-t', 'female2', '-p', '-8', '-r', '-12', clean],
+                    ['spd-say', '-p', '-5', '-r', '-10', clean],
+                    ['espeak-ng', '-v', 'en+f3', '-s', '150', '-p', '55', '-g', '8', clean],
+                    ['espeak', '-v', 'en+f3', '-s', '150', '-p', '55', '-g', '8', clean],
                 ]
                 for cmd in linux_commands:
+                    if shutil.which(cmd[0]) is None:
+                        continue
                     try:
-                        p = subprocess.Popen(cmd)
+                        subprocess.Popen(cmd)
                         break
                     except Exception:
                         continue
         except Exception as e:
             print(f"TTS execution error: {e}")
+
+    def _speak_with_piper(self, text):
+        """Use a local Piper model when one is available, for a neural voice."""
+        piper = (
+            os.environ.get('MARTHA_PIPER_BIN')
+            or shutil.which('piper')
+            or os.path.expanduser('~/.local/share/martha/piper-venv/bin/piper')
+        )
+        model = (
+            os.environ.get('MARTHA_PIPER_MODEL')
+            or os.path.expanduser('~/.local/share/martha/voices/en_US-amy-medium.onnx')
+        )
+        player = shutil.which('aplay')
+        if not (piper and os.path.exists(piper) and model and os.path.exists(model) and player):
+            return False
+        rate = os.environ.get('MARTHA_PIPER_RATE', '22050')
+        try:
+            synth = subprocess.Popen(
+                [piper, '-m', model, '--output-raw',
+                 '--length-scale', '1.03', '--sentence-silence', '0.25', '--volume', '0.95'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            play = subprocess.Popen(
+                [player, '-q', '-r', rate, '-f', 'S16_LE', '-t', 'raw', '-'],
+                stdin=synth.stdout, stderr=subprocess.DEVNULL
+            )
+            synth.stdout.close()
+            synth.stdin.write(text.encode('utf-8'))
+            synth.stdin.close()
+
+            def reap():
+                for proc in (synth, play):
+                    try:
+                        proc.wait(timeout=30)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+
+            threading.Thread(target=reap, daemon=True).start()
+            return True
+        except Exception as e:
+            print(f"Piper TTS error: {e}")
+            return False
 
     def stop_speech(self):
         try:
@@ -241,7 +313,9 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
                 subprocess.Popen(['killall', 'spd-say'])
+                subprocess.Popen(['killall', 'espeak-ng'])
                 subprocess.Popen(['killall', 'espeak'])
+                subprocess.Popen(['killall', 'piper'])
         except Exception:
             pass
 
@@ -348,10 +422,10 @@ def run(server_class=ThreadingHTTPServer, handler_class=MarthaRequestHandler):
 
     lan_ip = get_lan_ip()
     print("=" * 64)
-    print("  ✨ MARTHA VOICE AI — MULTI-PLATFORM ASSISTANT")
+    print("  MARTHA VOICE AI - MULTI-PLATFORM ASSISTANT")
     print("=" * 64)
-    print(f"  💻 Desktop : http://localhost:{PORT}")
-    print(f"  📱 Mobile  : http://{lan_ip}:{PORT}")
+    print(f"  Desktop : http://localhost:{PORT}")
+    print(f"  Mobile  : http://{lan_ip}:{PORT}")
     print("=" * 64)
     print("  Press Ctrl+C to stop server.\n")
     
