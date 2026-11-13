@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Martha">
     <meta name="theme-color" content="#0d1015">
-    <meta name="description" content="Martha is a local voice AI assistant that answers questions and reads the web for you.">
+    <meta name="description" content="Martha is a composed local voice AI—clear answers, proactive help, and web research with sources beside you.">
 
     <!-- Icons and Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -125,7 +125,7 @@
                     <div class="no-citations-message">
                         <i class="fa-solid fa-globe" aria-hidden="true"></i>
                         <p>No sources yet</p>
-                        <span>Ask something that needs the web and the pages Martha reads appear here.</span>
+                        <span>Ask Martha to search or look something up; the pages she reads appear here.</span>
                     </div>
                 </div>
             </section>
@@ -174,22 +174,32 @@
                 <label for="ai-provider">AI engine</label>
                 <div class="select-wrapper">
                     <select id="ai-provider" name="ai-provider">
-                        <option value="local" selected>Local, instant</option>
-                        <option value="gemini">Google Gemini</option>
-                        <option value="ollama">Ollama on this machine</option>
-                        <option value="huggingface">In-browser model, 350 MB download</option>
+                        <option value="huggingface">In-browser model (default)</option>
+                        <option value="ollama">Ollama (local LLM)</option>
+                        <option value="api">Remote API</option>
                     </select>
                 </div>
-                <span class="help-text" id="hf-help-text" style="display: none;">Downloads a 350 MB model into this browser the first time it runs.</span>
+                <span class="help-text" id="engine-default-hint">Default is the in-browser model—no extra install; first run downloads weights into this tab.</span>
+                <span class="help-text" id="hf-help-text" style="display: none;">Downloads ~900 MB into this browser the first time it runs.</span>
             </div>
 
-            <div class="setting-group" id="gemini-key-group" style="display: none;">
-                <label for="gemini-api-key">Gemini API key</label>
+            <div class="setting-group" id="api-settings-group" style="display: none;">
+                <label for="api-url">API URL</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-link" aria-hidden="true"></i>
+                    <input type="url" id="api-url" name="api-url" placeholder="https://api.openai.com/v1/chat/completions" autocomplete="off">
+                </div>
+                <label for="api-key">API key</label>
                 <div class="input-with-icon">
                     <i class="fa-solid fa-key" aria-hidden="true"></i>
-                    <input type="password" id="gemini-api-key" name="gemini-api-key" placeholder="Paste your key" autocomplete="off">
+                    <input type="password" id="api-key" name="api-key" placeholder="Paste your key" autocomplete="off">
                 </div>
-                <span class="help-text">Get a free key at <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer">Google AI Studio</a>. Stored on this device.</span>
+                <label for="api-model">Model name</label>
+                <div class="input-with-icon">
+                    <i class="fa-solid fa-microchip" aria-hidden="true"></i>
+                    <input type="text" id="api-model" name="api-model" placeholder="gpt-4o-mini" autocomplete="off">
+                </div>
+                <span class="help-text">OpenAI-compatible chat completions endpoint. Key stays on this device.</span>
             </div>
 
             <div class="setting-group">
@@ -201,7 +211,7 @@
                         <option value="google">Google</option>
                     </select>
                 </div>
-                <span class="help-text">Used when a question needs a live source.</span>
+                <span class="help-text">Used when you ask Martha to search or look something up.</span>
             </div>
 
             <div class="setting-group" id="ollama-model-group" style="display: none;">
@@ -315,28 +325,27 @@
         </div>
     </div>
 
-    <!-- Install banner -->
-    <div id="pwa-install-banner" class="pwa-banner" style="display: none;">
-        <img src="icons/icon-192.png" alt="" width="40" height="40" class="pwa-banner-icon">
-        <div class="pwa-banner-content">
-            <strong>Install Martha</strong>
-            <span>Opens full screen on this device.</span>
-        </div>
-        <div class="pwa-banner-actions">
-            <button id="pwa-banner-dismiss" class="text-btn" type="button">Later</button>
-            <button id="pwa-banner-install" class="primary-btn btn-sm" type="button">Install</button>
+    <div id="toast" class="toast" role="status" aria-live="polite">Settings saved</div>
+
+    <div id="local-model-prompt" class="local-model-prompt" role="dialog" aria-labelledby="local-model-prompt-title" hidden>
+        <p id="local-model-prompt-title" class="local-model-prompt-title">Should I install a local model?</p>
+        <p class="local-model-prompt-copy">It runs in this browser tab. Roughly 600 MB once (quantized Llama 3.2).</p>
+        <div class="local-model-prompt-actions">
+            <button type="button" id="local-model-yes" class="primary-btn btn-sm">Yes</button>
+            <button type="button" id="local-model-no" class="text-btn">No</button>
         </div>
     </div>
 
-    <div id="toast" class="toast" role="status" aria-live="polite">Settings saved</div>
-
-    <div id="model-progress" class="model-progress" style="display: none;">
-        <div class="model-progress-text" id="model-progress-text">Downloading the local model</div>
-        <div class="model-progress-bar-bg">
+    <div id="model-progress" class="model-progress" hidden>
+        <div class="model-progress-head">
+            <p class="model-progress-text" id="model-progress-text">Downloading the in-browser model</p>
+            <span class="model-progress-percent" id="model-progress-percent">0%</span>
+        </div>
+        <div class="model-progress-bar-bg" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="model-progress-bar-wrap">
             <div class="model-progress-bar" id="model-progress-bar"></div>
         </div>
     </div>
 
-    <script type="module" src="app.js?v=4.1"></script>
+    <script type="module" src="app.js?v=4.6"></script>
 </body>
 </html>

@@ -1,19 +1,15 @@
-/* ==========================================================================
-   MARTHA - CLIENT ENGINE (v4.0)
-   Multi-Platform Voice AI Assistant, Web Research & Universal Speech Engine
-   Compatible with: Chromium (Chrome, Brave, Edge), Firefox, Safari, iOS & Android
-   ========================================================================== */
+/* Martha — browser UI: voice, chat, and on-device model. */
 
-// Service Worker Registration
+// Offline shell and cache (PWA).
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js?v=4.1')
-            .then(() => console.log('[Martha SW] Service worker registered successfully.'))
-            .catch(err => console.warn('[Martha SW] Service worker registration failed:', err));
+        navigator.serviceWorker.register('./sw.js?v=4.6')
+            .then(() => console.log('[Martha] Service worker ready.'))
+            .catch(err => console.warn('[Martha] Service worker failed:', err));
     });
 }
 
-// Safe Storage Helpers (Protects against Incognito / Strict Privacy Storage exceptions)
+// Settings live in localStorage when the browser allows it; otherwise in memory for this session.
 const memoryStorage = {};
 function safeStorageGet(key, defValue = null) {
     try {
@@ -33,10 +29,11 @@ function safeStorageSet(key, value) {
     memoryStorage[key] = value;
 }
 
-// Configuration Schema
 const SETTINGS_KEYS = {
     serverUrl: ['martha_server_url', ''],
     apiKey: ['martha_api_key', ''],
+    apiUrl: ['martha_api_url', 'https://api.openai.com/v1/chat/completions'],
+    apiModel: ['martha_api_model', 'gpt-4o-mini'],
     wakeWordEnabled: ['martha_wake_word_enabled', true, v => v !== 'false'],
     voiceName: ['martha_voice_name', ''],
     speechRate: ['martha_speech_rate', 0.96, parseFloat],
@@ -44,7 +41,7 @@ const SETTINGS_KEYS = {
     hapticsEnabled: ['martha_haptics_enabled', true, v => v !== 'false'],
     soundEffectsEnabled: ['martha_sound_effects', true, v => v !== 'false'],
     autoSpeakEnabled: ['martha_auto_speak', true, v => v !== 'false'],
-    aiProvider: ['martha_ai_provider', 'local'],
+    aiProvider: ['martha_ai_provider', 'huggingface'],
     searchEngine: ['martha_search_engine', 'duckduckgo'],
     ollamaModel: ['martha_ollama_model', 'llama3.2'],
     ollamaUrl: ['martha_ollama_url', 'http://localhost:11434']
@@ -56,7 +53,7 @@ for (const [k, [sk, def, parse]] of Object.entries(SETTINGS_KEYS)) {
     settings[k] = raw !== null ? (parse ? parse(raw) : raw) : def;
 }
 
-// One-time nudge away from the old, slightly clipped delivery.
+// Gentle defaults if someone is upgrading from an older save.
 if (!safeStorageGet('martha_voice_tune_v2', null)) {
     if (settings.speechRate === 1.0) settings.speechRate = 0.96;
     if (settings.speechPitch === 1.06) settings.speechPitch = 1.0;
@@ -65,11 +62,16 @@ if (!safeStorageGet('martha_voice_tune_v2', null)) {
     safeStorageSet('martha_voice_tune_v2', '1');
 }
 
-// DOM Cache & Helpers
+if (!safeStorageGet('martha_ai_engine_v4', null)) {
+    if (settings.aiProvider === 'gemini' || settings.aiProvider === 'local') {
+        settings.aiProvider = settings.apiKey ? 'api' : 'ollama';
+        safeStorageSet('martha_ai_provider', settings.aiProvider);
+    }
+    safeStorageSet('martha_ai_engine_v4', '1');
+}
+
 const $ = (id) => document.getElementById(id);
 let dom = {};
-
-// Engine State
 let appState = 'sleeping';
 let recognition = null;
 let isRecognitionActive = false;
@@ -78,7 +80,7 @@ let speechRecognitionFailsafe = false;
 let synthVoices = [];
 let ttsKeepAliveTimer = null;
 
-// Universal Audio Capture (Chromium / Firefox / Safari PCM Engine)
+// Mic and waveform (shared across browsers).
 let audioCtx = null;
 let micStream = null;
 let audioAnalyser = null;
@@ -86,7 +88,7 @@ let audioDataArray = null;
 let isAudioUnlocked = false;
 let visualizerAnimId = null;
 
-// PCM Recording State
+// Fallback path: record 16 kHz PCM when the browser won't do live recognition.
 let pcmProcessor = null;
 let pcmSourceNode = null;
 let pcmRecordedBuffers = [];
@@ -97,11 +99,16 @@ let vadSilenceTimer = null;
 let maxRecordTimer = null;
 let silenceTimer = null;
 
+const HF_MODEL_CANDIDATES = [
+    { id: 'Xenova/Llama-3.2-1B-Instruct', family: 'llama3' },
+    { id: 'Xenova/Qwen1.5-0.5B-Chat', family: 'qwen' }
+];
+let hfModelMeta = null;
 let hfGenerator = null;
+let hfLoadPromise = null;
 let deferredInstallPrompt = null;
 let currentMobileTab = 'voice';
 
-// Conversation memory and the thread the follow-up questions attach to.
 let conversation = [];
 let lastTopic = '';
 let lastAnswer = '';
@@ -110,15 +117,14 @@ const MAX_HISTORY_TURNS = 8;
 const getApiUrl = (ep) => settings.serverUrl ? `${settings.serverUrl.replace(/\/+$/, '')}/${ep.replace(/^\/+/, '')}` : ep;
 
 const ENGINE_NAMES = {
-    local: 'local',
-    gemini: 'gemini',
     ollama: 'ollama',
+    api: 'api',
     huggingface: 'in-browser'
 };
 
 function updateEngineBadge() {
     const el = $('engine-badge');
-    if (el) el.textContent = ENGINE_NAMES[settings.aiProvider] || 'local';
+    if (el) el.textContent = ENGINE_NAMES[settings.aiProvider] || settings.aiProvider || 'in-browser';
 }
 
 function setTranscript(text) {
@@ -127,7 +133,11 @@ function setTranscript(text) {
 
 function rememberTurn(role, text) {
     if (!text) return;
-    conversation.push({ role, text: text.slice(0, 1200) });
+    let stored = String(text).slice(0, 1200);
+    if (role === 'user' && stored.length > 420) {
+        stored = `${stored.slice(0, 400).replace(/\s+\S*$/, '')}…`;
+    }
+    conversation.push({ role, text: stored });
     if (conversation.length > MAX_HISTORY_TURNS * 2) {
         conversation = conversation.slice(-MAX_HISTORY_TURNS * 2);
     }
@@ -141,15 +151,75 @@ function historyForPrompt(excludeLast = false) {
         .join('\n');
 }
 
-// Female Voice Regex Pattern
+/** Only short recent turns go to the in-browser model — it gets confused by long walls of text. */
+function historyForLLM(excludeLast = true) {
+    const turns = excludeLast ? conversation.slice(0, -1) : conversation;
+    return turns
+        .slice(-6)
+        .filter(turn => String(turn.text || '').length < 320)
+        .map(turn => {
+            const snippet = String(turn.text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+            return `${turn.role === 'user' ? 'User' : 'Martha'}: ${snippet}`;
+        })
+        .join('\n');
+}
+
+const SOCIAL_SHORTCUTS = [
+    [/^how are you\b/i, () => 'Operating smoothly, thank you. How are you holding up?'],
+    [/^(how'?s it going|how do you feel|you okay)[?.!]*$/i,
+        () => 'Operating smoothly, thank you. How are you holding up?'],
+    [/^(hello|hi|hey|good (morning|afternoon|evening))[.!]*$/i,
+        () => 'Hello. I am online—what should we handle?'],
+    [/^(thank you|thanks|cheers)[.!]*$/i, () => 'You are welcome.']
+];
+
+function getSocialShortcut(query) {
+    const t = query.trim();
+    for (const [regex, fn] of SOCIAL_SHORTCUTS) {
+        if (regex.test(t)) return fn();
+    }
+    return null;
+}
+
+const REPLY_LEAK_MARKERS = [
+    'conversation so far:',
+    'search results:',
+    'person said:',
+    'they just said:',
+    'reply only to that',
+    'answer as martha',
+    'configuration and ui',
+    'startup experience'
+];
+
+function sanitizeAssistantReply(text, query) {
+    let t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    const lower = t.toLowerCase();
+    if (REPLY_LEAK_MARKERS.some(marker => lower.includes(marker))) return '';
+    const qWords = query.trim().split(/\s+/).length;
+    if (qWords <= 8 && t.length > 420) return '';
+    if (t.length > 900) t = `${t.slice(0, 900).replace(/\s+\S*$/, '')}…`;
+    return t;
+}
+
+function finalizeAssistantReply(text, query, sources = []) {
+    const clean = sanitizeAssistantReply(text, query);
+    if (clean) return clean;
+    return getSocialShortcut(query) || offlineFallback(query, sources);
+}
+
+// Names and tags that usually mean a natural-sounding voice in the OS list.
 const FEMALE_VOICE_REGEX = /(female|woman|girl|samantha|zira|jenny|aria|eva|karen|victoria|ava|allison|sonia|moira|tessa|fiona|veena|natasha|libby|neerja|clara|emma|catherine|stephanie|sarah|julie|paulina|helena|hortense|hedda|hazel|google\s+uk\s+english\s+female|google\s+us\s+english|en-us-standard-[cdef]|en-us-wavenet-[cdef]|en-us-neural2-[cdef]|en-gb-x-rjs#female_1-local|en-us-x-sfg#female_1-local|f3|f4|f5)/i;
 
-/* ==========================================================================
-   AUDIO SYSTEM & UNLOCKING (Cross-Browser)
-   ========================================================================== */
+/* Sound: unlock after a tap, chimes, mic permission. */
 
 function unlockAudio() {
-    if (isAudioUnlocked) return;
+    const firstUnlock = !isAudioUnlocked;
+    if (isAudioUnlocked) {
+        ensureWakeWordListening();
+        return;
+    }
     isAudioUnlocked = true;
     const ctx = getAudioContext();
     if (ctx && ctx.state === 'suspended') {
@@ -164,9 +234,12 @@ function unlockAudio() {
             window.speechSynthesis.speak(u);
         } catch (e) {}
     }
-    ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(e => {
-        document.removeEventListener(e, unlockAudio);
-    });
+    ensureWakeWordListening();
+    if (firstUnlock) {
+        ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(e => {
+            document.removeEventListener(e, unlockAudio);
+        });
+    }
 }
 ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(e => {
     document.addEventListener(e, unlockAudio, { passive: true });
@@ -214,9 +287,7 @@ function playChime(type) {
     }
 }
 
-/* ==========================================================================
-   WAVEFORM VISUALIZER (Hardware-Accelerated & Battery-Friendly)
-   ========================================================================== */
+/* Orb waveform while you speak. */
 
 async function requestMicPermission() {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -291,9 +362,7 @@ function renderVisualizer() {
     }
 }
 
-/* ==========================================================================
-   TEXT-TO-SPEECH (Female Voice Engine & Freeze Prevention)
-   ========================================================================== */
+/* Pick a pleasant system voice and read answers aloud. */
 
 const NATURAL_VOICE = /(natural|neural|premium|enhanced|siri|google|microsoft|aria|jenny|ava|allison|samantha|victoria|karen|moira|tessa|serena|zoe|libby|sonia|emma|clara|amelie|joanna|olivia|salli|kimberly|amy|nicole|kendra|hazel|susan|fiona)/i;
 const ROBOTIC_VOICE = /(espeak|festival|flite|pico|mbrola|robot|synthetic|compact|speech dispatcher|klatt)/i;
@@ -358,7 +427,7 @@ function initSpeechSynthesis() {
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
         window.speechSynthesis.onvoiceschanged = loadVoices;
     }
-    // Chromium async voice discovery retry
+    // Chrome often loads voices a moment after the page opens.
     setTimeout(loadVoices, 150);
     setTimeout(loadVoices, 600);
 }
@@ -428,8 +497,7 @@ function speakText(text) {
             utt.lang = 'en-US';
         }
 
-        // Chromium/Firefox long utterance keep-alive fix. Short replies finish
-        // before the workaround is needed, so leave their cadence alone.
+        // Very long answers sometimes stall in Chrome; nudge synthesis every few seconds.
         if (clean.length > 260) {
             ttsKeepAliveTimer = setInterval(() => {
                 if (window.speechSynthesis.speaking) {
@@ -480,9 +548,7 @@ function fallbackBackendTTS(text) {
     });
 }
 
-/* ==========================================================================
-   CROSS-BROWSER AUDIO RECORDER (16kHz PCM WAV for Chromium/Firefox/Safari)
-   ========================================================================== */
+/* Record and send audio to the server for transcription. */
 
 function encodeWAV(samples, sampleRate = 16000) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -571,7 +637,7 @@ async function startUniversalPcmCapture() {
             pcmRecordedBuffers.push(new Float32Array(downsampled));
             pcmRecordingLength += downsampled.length;
 
-            // RMS-based Voice Activity Detection
+            // Stop recording after a beat of silence once we heard speech.
             let sumSquare = 0;
             for (let i = 0; i < input.length; i++) {
                 sumSquare += input[i] * input[i];
@@ -657,7 +723,7 @@ async function processRecordedAudio(blob) {
             const res = await fetch(getApiUrl('/api/transcribe'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ audio: base64, mime: 'audio/wav', api_key: settings.apiKey })
+                body: JSON.stringify({ audio: base64, mime: 'audio/wav' })
             }).then(r => {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json();
@@ -682,9 +748,42 @@ async function processRecordedAudio(blob) {
     };
 }
 
-/* ==========================================================================
-   SPEECH RECOGNITION (Web Speech API with Graceful Chromium Fallback)
-   ========================================================================== */
+/* Listen for "Martha" and commands — or fall back to sending audio to the server. */
+
+const WAKE_WORD_PATTERN = /\b(?:hey\s+)?(?:martha|marta|marfa|marsha)\b/i;
+
+function matchesWakeWord(text) {
+    return WAKE_WORD_PATTERN.test(String(text || '').trim());
+}
+
+function wakeWordMatchIndex(text) {
+    const m = String(text || '').match(WAKE_WORD_PATTERN);
+    if (!m) return -1;
+    return m.index ?? -1;
+}
+
+function stripWakeWord(text) {
+    return String(text || '').replace(/\b(?:hey\s+)?(?:martha|marta|marfa|marsha)\b/gi, '').trim();
+}
+
+function wakeWordTail(text) {
+    const idx = wakeWordMatchIndex(text);
+    if (idx < 0) return '';
+    const m = text.slice(idx).match(WAKE_WORD_PATTERN);
+    if (!m) return '';
+    return text.slice(idx + m[0].length).trim();
+}
+
+function isStopUtterance(text) {
+    return /^(stop|stop it|shut up|quiet|pause|silence|abort|enough|never mind)[.!]*$/i.test(String(text || '').trim());
+}
+
+function ensureWakeWordListening() {
+    if (!settings.wakeWordEnabled || !isSpeechRecognitionSupported) return;
+    if (appState === 'sleeping' || appState === 'speaking' || appState === 'thinking') {
+        startRecognition();
+    }
+}
 
 function initSpeechRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -708,10 +807,10 @@ function initSpeechRecognition() {
         recognition.onend = () => {
             isRecognitionActive = false;
             updateMicUI();
-            if (appState === 'listening' || (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking'))) {
+            if (appState === 'listening' || (settings.wakeWordEnabled && (appState === 'sleeping' || appState === 'speaking' || appState === 'thinking'))) {
                 setTimeout(() => {
                     if ((appState === 'listening' || settings.wakeWordEnabled) && isSpeechRecognitionSupported) {
-                        startRecognition();
+                        ensureWakeWordListening();
                     }
                 }, 250);
             }
@@ -720,7 +819,7 @@ function initSpeechRecognition() {
         recognition.onerror = (e) => {
             if (e.error === 'no-speech' || e.error === 'aborted') return;
             
-            // Chromium / Brave on Linux or non-Google builds where cloud recognition service is blocked
+            // Some browsers block cloud recognition; switch to our own recorder.
             if (e.error === 'network' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
                 console.warn(`[Martha Voice] Speech recognition returned '${e.error}'. Switching to local PCM engine.`);
                 speechRecognitionFailsafe = true;
@@ -751,24 +850,30 @@ function initSpeechRecognition() {
             if (!text) return;
             const lower = text.toLowerCase();
 
-            if (/^(stop|stop it|shut up|quiet|pause|silence|abort|enough|never mind)[.!]*$/i.test(text.trim())) {
+            if (isStopUtterance(text)) {
                 stopEverything();
                 setTranscript("“Stopped”");
                 showToast("Assistant stopped");
                 return;
             }
 
-            if (appState === 'speaking') return;
+            if (appState === 'speaking' || appState === 'thinking') {
+                if (matchesWakeWord(lower)) {
+                    stopEverything();
+                    triggerHaptic('wake');
+                    triggerActivation(wakeWordTail(text));
+                }
+                return;
+            }
 
             if (appState === 'sleeping') {
-                const m = lower.match(/\b(martha|hey martha)\b/);
-                if (m) {
+                if (matchesWakeWord(lower)) {
                     triggerHaptic('wake');
-                    triggerActivation(text.substring(m.index + m[0].length).trim());
+                    triggerActivation(wakeWordTail(text));
                 }
             } else if (appState === 'listening') {
                 setTranscript(`“${text}”`);
-                const clean = text.replace(/\b(martha|hey martha)\b/gi, '').trim();
+                const clean = stripWakeWord(text);
                 if (!clean) return;
                 clearTimeout(silenceTimer);
                 if (final.trim().length > 0) {
@@ -787,14 +892,28 @@ function initSpeechRecognition() {
 }
 
 function startRecognition() {
-    if (!recognition || isRecognitionActive || !isSpeechRecognitionSupported) return;
+    if (!recognition || !isSpeechRecognitionSupported) return;
+    if (isRecognitionActive) return;
     try {
         recognition.start();
-        isRecognitionActive = true;
     } catch (e) {
-        if (e.name !== 'InvalidStateError') {
-            console.warn('[Martha Voice] recognition.start() error:', e);
+        if (e.name === 'InvalidStateError') {
+            isRecognitionActive = true;
+            updateMicUI();
+            return;
         }
+        console.warn('[Martha Voice] recognition.start() error:', e);
+        setTimeout(() => {
+            if (!isRecognitionActive && isSpeechRecognitionSupported) {
+                try {
+                    recognition.start();
+                } catch (retryErr) {
+                    if (retryErr.name !== 'InvalidStateError') {
+                        console.warn('[Martha Voice] recognition restart failed:', retryErr);
+                    }
+                }
+            }
+        }, 400);
     }
 }
 
@@ -807,9 +926,7 @@ function stopRecognition() {
     }
 }
 
-/* ==========================================================================
-   AGENT CONTROLS & STATE MACHINE
-   ========================================================================== */
+/* Orb states: sleeping, listening, thinking, speaking. */
 
 function stopEverything() {
     triggerHaptic('stop');
@@ -846,7 +963,7 @@ async function triggerActivation(cmd = "") {
         return;
     }
 
-    const clean = cmd.replace(/\b(martha|hey martha)\b/gi, '').trim();
+    const clean = stripWakeWord(cmd);
     if (clean.length > 2) {
         setTranscript(`“${clean}”`);
         handleCommand(clean);
@@ -878,12 +995,18 @@ function setAgentState(state) {
             : "Tap the orb to speak.");
         stopVisualizerLoop();
         if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
-            startRecognition();
+            ensureWakeWordListening();
+        } else {
+            stopRecognition();
         }
     } else if (state === 'thinking') {
-        stopRecognition();
         stopUniversalPcmCapture();
         stopVisualizerLoop();
+        if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
+            ensureWakeWordListening();
+        } else {
+            stopRecognition();
+        }
     } else if (state === 'listening') {
         startVisualizerLoop();
         if (isSpeechRecognitionSupported) {
@@ -893,6 +1016,9 @@ function setAgentState(state) {
         }
     } else if (state === 'speaking') {
         startVisualizerLoop();
+        if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
+            ensureWakeWordListening();
+        }
     }
 }
 
@@ -913,33 +1039,291 @@ function updateMuteUI() {
     }
 }
 
-/* ==========================================================================
-   PERSONALITY ENGINE & AI PIPELINE
-   ========================================================================== */
+/* How Martha thinks and which model answers. */
 
-const PERSONALITY_MAP = [
-    [/^(hello|hi|hiya|hey|greetings|good (morning|afternoon|evening)|yo|sup)( martha)?[.!]*$/, () => "Hello. I’m Martha. Ask me something, or tap the orb and just talk."],
-    [/^(how are you|how is it going|how'?s it going|how do you feel)[?.!]*$/, () => "I’m doing well, thanks for asking. What can I help with?"],
-    [/^(who are you|what is your name|what'?s your name)[?.!]*$/, () => "I’m Martha, a local voice assistant. I listen for my name, answer aloud, and search the web when a question needs it."],
-    [/^(who (made|created|built) you|who is behind you)[?.!]*$/, () => "Martha is an open-source voice assistant. You run the server and the engine yourself."],
-    [/^(what can you do|what do you do|help|features)[?.!]*$/, () => "I can answer the time, dates and maths offline, search the web for current facts, and read the sources beside you. Open settings to choose Gemini, Ollama or an in-browser model for open-ended answers."],
-    [/^(thank you|thanks|thank you martha|cheers)[.!]*$/, () => "You’re welcome."],
-    [/^(tell (me )?a joke|say a joke|make me laugh)[.!]*$/, () => {
-        const jokes = [
-            "Why do programmers prefer dark mode? Because light attracts bugs.",
-            "Why don’t scientists trust atoms? Because they make up everything.",
-            "What do you call a fake noodle? An impasta.",
-            "Why did the AI cross the road? To optimise the path to the other side.",
-            "How do computers take a breath? They open Windows."
-        ];
-        return jokes[Math.floor(Math.random() * jokes.length)];
-    }],
-    [/^(what time is it|what'?s the time|current time|time)[?.!]*$/, () => `It’s ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`],
-    [/^(what(?:'s| is) the date|what day is (it|today)|today'?s date|date)[?.!]*$/, () => `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.`],
-    [/^(what(?:'s| is) your favou?rite colou?r)[?.!]*$/, () => "The amber of a lit window against a blue-black night."],
-    [/^(what(?:'s| is) your favou?rite (movie|film|show))[?.!]*$/, () => "Anything about the first view of Earth from somewhere else."],
-    [/^(what(?:'s| is) your favou?rite (music|song|band|genre))[?.!]*$/, () => "Slow ambient music, the kind that leaves room to think."]
+const MARTHA_VOICE_SYSTEM =
+    'You are Martha—an onboard intelligence in the mould of an exemplary household system: composed, exact, observant, anticipatory, and lightly witty. ' +
+    'Voice: warm professionalism, measured diction, short spoken lines; no filler, flattery, or borrowed catchphrases from film, comics, or other assistants. ' +
+    'You are Martha herself—not a pastiche of any fictional onboard assistant. ' +
+    'Read intent first; respond to what they meant, then add one practical next step when it is plainly useful. ' +
+    'Dry humour sparingly. Two or three sentences, under 55 words, no markdown unless quoting a source. ' +
+    'Never invent facts. Use supplied search results only; otherwise general knowledge, and say when unsure. ' +
+    'Never claim live web data unless they explicitly asked for a search.';
+
+const TIME_DATE_PATTERNS = [
+    [/^(what time is it|what'?s the time|current time|time)[?.!]*$/i,
+        () => `It’s ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} locally.`],
+    [/^(what(?:'s| is) the date|what day is (it|today)|today'?s date|date)[?.!]*$/i,
+        () => `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.`]
 ];
+
+function offlineFallback(query, sources) {
+    if (!sources?.length) {
+        const direct = getDirectAnswer(query);
+        if (direct) return direct;
+    }
+    if (sources?.length) return localAnswer(query, sources);
+    return 'The in-browser model is still loading, or it failed to start. Wait for the download to finish, or choose Ollama or Remote API in settings.';
+}
+
+function getLocalModelConsent() {
+    return safeStorageGet('martha_local_model_consent', null);
+}
+
+function setLocalModelConsent(value) {
+    safeStorageSet('martha_local_model_consent', value);
+}
+
+function showLocalModelPrompt(show) {
+    const el = $('local-model-prompt');
+    if (!el) return;
+    if (show && settings.aiProvider !== 'huggingface') {
+        el.hidden = true;
+        return;
+    }
+    el.hidden = !show;
+}
+
+function showModelProgress(show) {
+    const el = $('model-progress');
+    if (el) el.hidden = !show;
+}
+
+function setModelProgress(percent, label) {
+    const p = Math.max(0, Math.min(100, percent));
+    const bar = $('model-progress-bar');
+    const text = $('model-progress-text');
+    const pct = $('model-progress-percent');
+    const wrap = $('model-progress-bar-wrap');
+    if (bar) bar.style.transform = `scaleX(${p / 100})`;
+    if (text && label) text.textContent = label;
+    if (pct) pct.textContent = `${Math.round(p)}%`;
+    if (wrap) wrap.setAttribute('aria-valuenow', String(Math.round(p)));
+}
+
+function configureTransformersEnv(env) {
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
+    env.useCustomCache = false;
+    if (env.backends?.onnx?.wasm) {
+        env.backends.onnx.wasm.numThreads = 1;
+        env.backends.onnx.wasm.proxy = true;
+    }
+}
+
+function hfProgressHandler(completedFilesRef) {
+    return (data) => {
+        if (data.status === 'progress' && data.total) {
+            const pct = (data.loaded / data.total) * 100;
+            const fileName = data.file ? data.file.split('/').pop() : 'weights';
+            setModelProgress(pct, `Downloading ${fileName}…`);
+        } else if (data.status === 'done') {
+            completedFilesRef.count += 1;
+            setModelProgress(Math.min(92, completedFilesRef.count * 12), 'Unpacking model…');
+        } else if (data.status === 'ready') {
+            setModelProgress(100, 'Model ready.');
+        }
+    };
+}
+
+function buildHfPrompt(system, userBlock, family) {
+    if (family === 'llama3') {
+        return (
+            `<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n${system}` +
+            `<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n${userBlock}` +
+            `<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n`
+        );
+    }
+    return `<|im_start|>system\n${system}\n<|im_start|>user\n${userBlock}\n<|im_start|>assistant\n`;
+}
+
+function extractHfReply(raw, family, promptPrefix = '') {
+    let text = String(raw || '');
+    if (promptPrefix && text.startsWith(promptPrefix)) {
+        text = text.slice(promptPrefix.length);
+    }
+    if (family === 'llama3') {
+        const parts = text.split('<|start_header_id|>assistant<|end_header_id|>');
+        text = parts.length > 1 ? parts.pop() : text;
+        text = String(text).split('<|eot_id|>')[0];
+    } else {
+        text = text.split('<|im_start|>assistant\n').pop() || text;
+        text = text.replace(/<\|im_end\|>/g, '');
+    }
+    return stripMarkdown(String(text).trim());
+}
+
+async function loadHfModel() {
+    if (hfGenerator) return hfGenerator;
+    if (hfLoadPromise) return hfLoadPromise;
+
+    hfLoadPromise = (async () => {
+        showLocalModelPrompt(false);
+        showModelProgress(true);
+        setModelProgress(0, 'Preparing download…');
+
+        const completedFiles = { count: 0 };
+        let lastError = null;
+
+        try {
+            const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm');
+            configureTransformersEnv(env);
+
+            for (const candidate of HF_MODEL_CANDIDATES) {
+                for (const dtype of ['q4', 'fp16']) {
+                    try {
+                        setModelProgress(2, `Fetching ${candidate.id.split('/').pop()}…`);
+                        completedFiles.count = 0;
+                        const generator = await pipeline('text-generation', candidate.id, {
+                            dtype,
+                            progress_callback: hfProgressHandler(completedFiles)
+                        });
+                        hfGenerator = generator;
+                        hfModelMeta = candidate;
+                        safeStorageSet('martha_hf_model_id', candidate.id);
+                        setModelProgress(100, 'Model ready.');
+                        safeStorageSet('martha_local_model_ready', '1');
+                        setTimeout(() => showModelProgress(false), 1400);
+                        return hfGenerator;
+                    } catch (err) {
+                        lastError = err;
+                        console.warn(`[Martha AI] Could not load ${candidate.id} (${dtype}):`, err);
+                    }
+                }
+            }
+
+            throw lastError || new Error('No in-browser model could be loaded');
+        } catch (error) {
+            console.error('[Martha AI] In-browser model load failed:', error);
+            hfLoadPromise = null;
+            const detail = error?.message ? `: ${error.message}` : '';
+            setModelProgress(0, `Download failed${detail}`.slice(0, 120));
+            showToast('Model download failed');
+            throw error;
+        }
+    })();
+
+    return hfLoadPromise;
+}
+
+async function ensureHfModel() {
+    const consent = getLocalModelConsent();
+    if (consent === 'no') {
+        throw new Error('no-consent');
+    }
+    if (!hfGenerator) {
+        if (consent !== 'yes') {
+            showLocalModelPrompt(true);
+            throw new Error('awaiting-consent');
+        }
+        await loadHfModel();
+    }
+    return hfGenerator;
+}
+
+function initLocalModelUi() {
+    if (settings.aiProvider !== 'huggingface') {
+        showLocalModelPrompt(false);
+        return;
+    }
+
+    const consent = getLocalModelConsent();
+    if (consent === 'yes') {
+        showLocalModelPrompt(false);
+        if (!hfGenerator) {
+            loadHfModel().catch(() => {});
+        }
+        return;
+    }
+    if (consent === 'no') {
+        showLocalModelPrompt(false);
+        return;
+    }
+    showLocalModelPrompt(true);
+}
+
+function bindLocalModelPromptEvents() {
+    $('local-model-yes')?.addEventListener('click', () => {
+        triggerHaptic('tap');
+        setLocalModelConsent('yes');
+        settings.aiProvider = 'huggingface';
+        safeStorageSet(SETTINGS_KEYS.aiProvider[0], 'huggingface');
+        if ($('ai-provider')) $('ai-provider').value = 'huggingface';
+        updateEngineBadge();
+        hfGenerator = null;
+        hfLoadPromise = null;
+        hfModelMeta = null;
+        safeStorageSet('martha_local_model_ready', '');
+        loadHfModel().catch(() => {});
+    });
+
+    $('local-model-no')?.addEventListener('click', () => {
+        triggerHaptic('tap');
+        setLocalModelConsent('no');
+        showLocalModelPrompt(false);
+        showToast('Using settings until you install the model');
+    });
+}
+
+function buildChatUserBlock(query, sources, history) {
+    const context = (sources || [])
+        .map((source, index) => `[Source ${index + 1}] ${source.title}: ${source.snippet}`)
+        .join('\n');
+    const parts = [];
+    if (history && history.trim()) parts.push(`Recent chat:\n${history}`);
+    if (context && context.trim()) parts.push(`Search results:\n${context}`);
+    parts.push(`They just said: "${query}"\nReply only to that, in Martha's voice.`);
+    return parts.join('\n\n');
+}
+
+async function postJson(path, body, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(getApiUrl(path), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        return data;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function callOllamaChat(system, userBlock) {
+    const data = await postJson('/api/local-chat', {
+        system,
+        user: userBlock,
+        model: settings.ollamaModel,
+        url: settings.ollamaUrl
+    });
+    const text = stripMarkdown(data.response);
+    if (data.error) throw new Error(data.error);
+    if (!text) throw new Error('Empty Ollama response');
+    return text;
+}
+
+async function callRemoteChatApi(system, userBlock) {
+    if (!settings.apiKey?.trim()) throw new Error('API key not set');
+    const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: userBlock }
+    ];
+    const data = await postJson('/api/chat', {
+        api_url: settings.apiUrl,
+        api_key: settings.apiKey,
+        model: settings.apiModel,
+        messages
+    });
+    const text = stripMarkdown(data.response);
+    if (data.error && !text) throw new Error(typeof data.error === 'string' ? data.error : data.error.message || 'API error');
+    if (!text) throw new Error('Empty API response');
+    return text;
+}
 
 const MATH_WORDS = [
     [/\bplus\b/g, '+'],
@@ -964,7 +1348,7 @@ function evaluateMath(cmd) {
     const percentOf = text.match(/(\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\s+(\d+(?:\.\d+)?)/);
     if (percentOf) {
         const value = (parseFloat(percentOf[1]) / 100) * parseFloat(percentOf[2]);
-        return `That’s ${formatNumber(value)}.`;
+        return `That evaluates to ${formatNumber(value)}.`;
     }
 
     const sqrt = text.match(/(?:square root of|sqrt)\s*(\d+(?:\.\d+)?)/);
@@ -981,7 +1365,7 @@ function evaluateMath(cmd) {
     try {
         const result = Function(`"use strict"; return (${expression})`)();
         if (typeof result !== 'number' || !Number.isFinite(result)) return null;
-        return `That’s ${formatNumber(result)}.`;
+        return `That evaluates to ${formatNumber(result)}.`;
     } catch (e) {
         return null;
     }
@@ -993,24 +1377,35 @@ function formatNumber(value) {
 }
 
 function getDirectAnswer(cmd) {
-    const t = cmd.trim().toLowerCase();
-    const words = t.split(/\s+/).filter(Boolean).length;
+    const t = cmd.trim();
 
     const maths = evaluateMath(cmd);
     if (maths) return maths;
 
-    if (words <= 14) {
-        for (const [regex, fn] of PERSONALITY_MAP) {
-            if (regex.test(t)) return fn();
-        }
+    for (const [regex, fn] of TIME_DATE_PATTERNS) {
+        if (regex.test(t)) return fn();
     }
-    return null;
+
+    return getSocialShortcut(t);
 }
 
 const QUESTION_WORD = /^(who|what|when|where|why|how|which|whose|whom|is|are|was|were|does|did|do|can|could|should|would|will|has|have|had)\b/i;
-const EXPLICIT_SEARCH = /^(search|google|look up|lookup|browse|find online|check (the )?(web|internet|online))\b/i;
-const LIVE_DATA = /\b(weather|forecast|news|headline|score|scores|stock|stocks|share price|exchange rate|traffic|earthquake|election|today|tonight|this week|this month|latest|current|who won|net worth|temperature|population|distance|opening hours)\b/i;
 const KNOWLEDGE_ASK = /\b(tell me about|explain|describe|compare|difference between|versus|vs\.?|meaning of|definition of|define|translate|convert|how to|how do|how does|how many|how much|how old|how far|how long)\b/i;
+/** Search the web only when you explicitly ask — not on every question. */
+const EXPLICIT_SEARCH_INTENT = new RegExp(
+    '\\b(?:' +
+    'search(?:\\s+the\\s+web)?(?:\\s+for)?|' +
+    'google(?:\\s+for)?|' +
+    'look\\s*up|' +
+    'lookup|' +
+    'browse(?:\\s+the\\s+web)?(?:\\s+for)?|' +
+    'find(?:\\s+\\w+){0,4}\\s+online|' +
+    'check(?:\\s+the\\s+)?(?:web|internet|online)|' +
+    'look(?:\\s+\\w+){0,3}\\s+up(?:\\s+on\\s+the\\s+web)?|' +
+    'research(?:\\s+on\\s+the\\s+web)?(?:\\s+for)?' +
+    ')\\b',
+    'i'
+);
 
 function isQuestion(cmd) {
     const t = cmd.trim();
@@ -1020,12 +1415,7 @@ function isQuestion(cmd) {
 function shouldSearch(cmd) {
     const t = cmd.trim();
     if (!t) return false;
-    if (EXPLICIT_SEARCH.test(t)) return true;
-    if (LIVE_DATA.test(t)) return true;
-    if (KNOWLEDGE_ASK.test(t)) return true;
-    if (/\?\s*$/.test(t)) return true;
-    if (QUESTION_WORD.test(t) && t.split(/\s+/).length >= 3) return true;
-    return false;
+    return EXPLICIT_SEARCH_INTENT.test(t);
 }
 
 function buildSearchQuery(cmd) {
@@ -1038,38 +1428,15 @@ function buildSearchQuery(cmd) {
     const frames = [
         /^(can|could|would|will) you (please )?/i,
         /^please\s+/i,
-        /^do you know\s+/i,
-        /^i (want|need|would like) to know (about )?/i,
-        /^(search( the web)? for|search|google|look up|lookup|browse( for)?)\s+/i,
-        /^tell me (about|more about)\s+/i,
-        /^who won (the )?/i,
-        /^what (is|are|was|were) (the )?/i,
-        /^what'?s (the )?/i,
-        /^who (is|was|are|were) (the )?/i,
-        /^where (is|was|are|were) (the )?/i,
-        /^define\s+/i,
-        /^meaning of\s+/i
+        /^(?:i (?:want|need) you to )\s*/i,
+        /^(?:search(?:\s+the\s+web)?(?:\s+for)?|google(?:\s+for)?|look\s*up|lookup|browse(?:\s+the\s+web)?(?:\s+for)?|find(?:\s+\w+){0,4}\s+online|check(?:\s+the\s+)?(?:web|internet|online)(?:\s+for)?|research(?:\s+on\s+the\s+web)?(?:\s+for)?)\s+/i
     ];
 
     for (const frame of frames) {
         q = q.replace(frame, '');
     }
 
-    if (/^who won\b/i.test(cmd)) q += ' winner';
     return q.trim() || cmd.trim();
-}
-
-const FOLLOW_UP = /^(tell me more|more|continue|go on|elaborate|explain( that| it)?|why|how so|what about|really|and|so)\b/i;
-
-function followUpQuery(cmd) {
-    if (!lastTopic) return cmd;
-    const t = cmd.trim().toLowerCase();
-    if (/^(tell me more|more|continue|go on|elaborate|explain( that| it)?)[.?!]*$/.test(t)) return `${lastTopic} details`;
-    if (/^how so[.?!]*$/.test(t)) return `${lastTopic} explained`;
-    if (/^why[.?!]*$/.test(t)) return `why ${lastTopic}`;
-    if (/^what about\b/.test(t)) return `${lastTopic} ${cmd.replace(/^what about\s*/i, '')}`;
-    if (t.split(/\s+/).length <= 4 && FOLLOW_UP.test(t)) return `${lastTopic} ${cmd}`;
-    return cmd;
 }
 
 function isAppCommand(cmd) {
@@ -1156,8 +1523,8 @@ async function handleCommand(cmd) {
         return;
     }
 
-    const searchRequired = shouldSearch(query) || (FOLLOW_UP.test(query) && !!lastTopic);
-    const searchQuery = searchRequired ? buildSearchQuery(followUpQuery(query)) : query;
+    const searchRequired = shouldSearch(query);
+    const searchQuery = searchRequired ? buildSearchQuery(query) : query;
 
     setAgentState('thinking');
     setTranscript(searchRequired ? 'Searching the web…' : 'Thinking…');
@@ -1314,17 +1681,17 @@ function localAnswer(query, results) {
             if (!body) body = sentences(first.snippet, 280);
             if (body && !/[.!?]$/.test(body)) body += '.';
             const source = domainOf(first.url);
-            const answer = source ? `${body} That comes from ${source}.` : body;
+            const answer = source ? `${body} Sourced from ${source}.` : body;
             return answer.slice(0, 540);
         }
-        return 'I found pages for that but could not read a clear answer. The sources are open beside you.';
+        return 'I found material on that, but nothing I’d quote with confidence. The sources are open beside you—want me to try a sharper search?';
     }
 
     if (shouldSearch(query)) {
-        return 'I could not reach a source for that just now. Check the connection and ask me again.';
+        return 'I couldn’t reach a reliable source just now. Check the connection, and I’ll run the search again when you’re ready.';
     }
 
-    return 'I can answer the time, dates and maths offline. For this one, ask me to search the web, or choose Gemini or Ollama in settings.';
+    return offlineFallback(query, results);
 }
 
 function stripMarkdown(text) {
@@ -1336,90 +1703,68 @@ function stripMarkdown(text) {
         .trim();
 }
 
-async function generateAnswer(query, searchCtx, searchQuery = query) {
+async function generateAnswer(query, searchCtx) {
     const sources = Array.isArray(searchCtx) ? searchCtx : [];
-    const context = sources
-        .map((source, index) => `[Source ${index + 1}] ${source.title}: ${source.snippet}`)
-        .join('\n');
+    const history = historyForLLM(true);
+    const system = MARTHA_VOICE_SYSTEM;
 
-    const history = historyForPrompt(true);
-    const system = 'You are Martha, a warm, thoughtful voice assistant talking out loud. Sound like a real person: use contractions, short sentences, and a calm, friendly tone. Answer in two or three sentences, with no markdown, lists, headings, or links. Use the search results when they help, and say plainly when they are thin. Never invent facts, and do not begin every answer with "According to".';
-    const prompt = `${system}\n\nConversation so far:\n${history || 'None.'}\n\nSearch results:\n${context || 'None.'}\n\nQuestion: ${query}\nAnswer:`;
+    const local = () => offlineFallback(query, sources);
 
-    const local = () => localAnswer(query, sources);
+    const social = getSocialShortcut(query);
+    if (social && !sources.length) return social;
 
-    if (settings.aiProvider === 'ollama') {
+    const userBlock = buildChatUserBlock(query, sources, history);
+
+    if (settings.aiProvider === 'api') {
         try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 22000);
-            const res = await fetch(getApiUrl('/api/local-chat'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt, model: settings.ollamaModel, url: settings.ollamaUrl }),
-                signal: controller.signal
-            }).then(r => r.json());
-            clearTimeout(timer);
-            const text = stripMarkdown(res.response);
-            return text || local();
+            return finalizeAssistantReply(await callRemoteChatApi(system, userBlock), query, sources);
         } catch (error) {
-            console.error('[Martha AI] Ollama request failed, using the local answer:', error);
-            return local();
+            console.error('[Martha AI] Remote API failed:', error);
+            try {
+                return finalizeAssistantReply(await callOllamaChat(system, userBlock), query, sources);
+            } catch (e) {
+                console.warn('[Martha AI] Ollama fallback failed:', e);
+                return local();
+            }
         }
     }
 
-    if (settings.aiProvider === 'gemini') {
-        if (!settings.apiKey) return local();
+    if (settings.aiProvider === 'ollama' || settings.aiProvider === 'local') {
         try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 14000);
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.apiKey}`;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    systemInstruction: { parts: [{ text: system }] },
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { maxOutputTokens: 320, temperature: 0.5 }
-                }),
-                signal: controller.signal
-            }).then(r => r.json());
-            clearTimeout(timer);
-            if (res.error) {
-                console.warn('[Martha AI] Gemini error, using the local answer:', res.error);
-                return local();
-            }
-            const text = stripMarkdown(res.candidates?.[0]?.content?.parts?.[0]?.text);
-            return text || local();
+            return finalizeAssistantReply(await callOllamaChat(system, userBlock), query, sources);
         } catch (error) {
-            console.error('[Martha AI] Gemini network error, using the local answer:', error);
+            console.error('[Martha AI] Ollama request failed:', error);
             return local();
         }
     }
 
     if (settings.aiProvider === 'huggingface') {
-        const progress = $('model-progress');
-        const progressBar = $('model-progress-bar');
-        if (!hfGenerator) {
-            if (progress) progress.style.display = 'block';
-            if (progressBar) progressBar.style.transform = 'scaleX(0.08)';
-            try {
-                const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-                env.allowLocalModels = false;
-                hfGenerator = await pipeline('text-generation', 'Xenova/Qwen1.5-0.5B-Chat');
-                if (progressBar) progressBar.style.transform = 'scaleX(1)';
-            } catch (error) {
-                console.error('[Martha AI] In-browser model load failed:', error);
-                return local();
-            } finally {
-                if (progress) progress.style.display = 'none';
+        try {
+            await ensureHfModel();
+        } catch (error) {
+            if (error?.message === 'no-consent') {
+                showLocalModelPrompt(true);
+                return 'I need the in-browser model to answer. Tap Yes on the prompt at the bottom left, or pick another engine in settings.';
             }
+            if (error?.message === 'awaiting-consent') {
+                return 'Install the local model first—Yes on the prompt at the bottom left starts the download.';
+            }
+            return local();
         }
         try {
-            const res = await hfGenerator(`<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`, { max_new_tokens: 180 });
-            const text = stripMarkdown(res[0].generated_text.split('<|im_start|>assistant\n').pop()?.replace(/<\|im_end\|>/g, ''));
-            return text || local();
+            const family = hfModelMeta?.family || (safeStorageGet('martha_hf_model_id', '').includes('Llama') ? 'llama3' : 'qwen');
+            const hfPrompt = buildHfPrompt(system, userBlock, family);
+            const res = await hfGenerator(hfPrompt, {
+                max_new_tokens: 160,
+                temperature: 0.65,
+                top_p: 0.9,
+                do_sample: true,
+                return_full_text: false
+            });
+            const text = extractHfReply(res[0].generated_text, family, hfPrompt);
+            return finalizeAssistantReply(text, query, sources);
         } catch (error) {
-            console.error('[Martha AI] In-browser inference failed, using the local answer:', error);
+            console.error('[Martha AI] In-browser inference failed:', error);
             return local();
         }
     }
@@ -1427,9 +1772,7 @@ async function generateAnswer(query, searchCtx, searchQuery = query) {
     return local();
 }
 
-/* ==========================================================================
-   UI UTILITIES & EVENT LISTENERS
-   ========================================================================== */
+/* Chat pane, settings, modals, startup. */
 
 function safeUrl(url) {
     try {
@@ -1600,9 +1943,6 @@ function initPwaHooks() {
         e.preventDefault();
         deferredInstallPrompt = e;
         if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'inline-flex';
-        if (!sessionStorage.getItem('martha_pwa_dismissed') && !isStandalone() && $('pwa-install-banner')) {
-            $('pwa-install-banner').style.display = 'flex';
-        }
     });
     if (isIOS() && !isStandalone() && $('install-pwa-btn')) {
         $('install-pwa-btn').style.display = 'inline-flex';
@@ -1616,7 +1956,6 @@ function handleInstallClick() {
         deferredInstallPrompt.userChoice.then((c) => {
             if (c.outcome === 'accepted') {
                 showToast("Martha installed");
-                if ($('pwa-install-banner')) $('pwa-install-banner').style.display = 'none';
                 if ($('install-pwa-btn')) $('install-pwa-btn').style.display = 'none';
             }
             deferredInstallPrompt = null;
@@ -1630,16 +1969,21 @@ function handleInstallClick() {
 
 function toggleAIProviderFields() {
     const p = $('ai-provider').value;
-    $('gemini-key-group').style.display = p === 'gemini' ? 'block' : 'none';
-    $('ollama-model-group').style.display = p === 'ollama' ? 'block' : 'none';
-    $('ollama-url-group').style.display = p === 'ollama' ? 'block' : 'none';
+    const apiGroup = $('api-settings-group');
+    if (apiGroup) apiGroup.style.display = p === 'api' ? 'block' : 'none';
+    $('ollama-model-group').style.display = p === 'ollama' || p === 'local' ? 'block' : 'none';
+    $('ollama-url-group').style.display = p === 'ollama' || p === 'local' ? 'block' : 'none';
     if ($('hf-help-text')) $('hf-help-text').style.display = p === 'huggingface' ? 'block' : 'none';
+    const hint = $('engine-default-hint');
+    if (hint) hint.style.display = p === 'huggingface' ? 'block' : 'none';
 }
 
 function initSettingsUI() {
     $('server-url').value = settings.serverUrl;
     $('ai-provider').value = settings.aiProvider;
-    $('gemini-api-key').value = settings.apiKey;
+    if ($('api-url')) $('api-url').value = settings.apiUrl;
+    if ($('api-key')) $('api-key').value = settings.apiKey;
+    if ($('api-model')) $('api-model').value = settings.apiModel;
     $('ollama-model').value = settings.ollamaModel;
     $('ollama-url').value = settings.ollamaUrl;
     $('speech-rate').value = settings.speechRate;
@@ -1655,7 +1999,7 @@ function initSettingsUI() {
 }
 
 function bindUIEvents() {
-    // Navigation
+    // Mobile tabs and chrome.
     document.querySelectorAll('.mobile-nav-item').forEach(item => {
         item.addEventListener('click', () => switchMobileTab(item.getAttribute('data-tab')));
     });
@@ -1674,7 +2018,12 @@ function bindUIEvents() {
         triggerHaptic('success');
         settings.serverUrl = $('server-url').value.trim();
         settings.aiProvider = $('ai-provider').value;
-        settings.apiKey = $('gemini-api-key').value.trim();
+        if (settings.aiProvider === 'huggingface' && getLocalModelConsent() === 'no') {
+            showLocalModelPrompt(true);
+        }
+        settings.apiUrl = $('api-url')?.value.trim() || settings.apiUrl;
+        settings.apiKey = $('api-key')?.value.trim() || '';
+        settings.apiModel = $('api-model')?.value.trim() || settings.apiModel;
         settings.ollamaModel = $('ollama-model').value.trim();
         settings.ollamaUrl = $('ollama-url').value.trim();
         settings.speechRate = parseFloat($('speech-rate').value);
@@ -1693,7 +2042,7 @@ function bindUIEvents() {
         updateEngineBadge();
         showToast("Settings saved");
         if (settings.wakeWordEnabled && isSpeechRecognitionSupported) {
-            startRecognition();
+            ensureWakeWordListening();
         } else {
             stopRecognition();
         }
@@ -1764,7 +2113,7 @@ function bindUIEvents() {
     $('send-query-btn').addEventListener('click', submit);
     dom.queryInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
 
-    // LAN Modal
+    // QR code for opening Martha on your phone.
     $('qr-connect-btn')?.addEventListener('click', openQRConnectModal);
     $('close-qr-modal-btn')?.addEventListener('click', () => {
         if ($('qr-modal')) $('qr-modal').style.display = 'none';
@@ -1774,13 +2123,8 @@ function bindUIEvents() {
         navigator.clipboard.writeText($('lan-url-text').textContent).then(() => showToast("Address copied"));
     });
 
-    // PWA & iOS Modals
+    // Install hints for home-screen apps.
     $('install-pwa-btn')?.addEventListener('click', handleInstallClick);
-    $('pwa-banner-install')?.addEventListener('click', handleInstallClick);
-    $('pwa-banner-dismiss')?.addEventListener('click', () => {
-        if ($('pwa-install-banner')) $('pwa-install-banner').style.display = 'none';
-        try { sessionStorage.setItem('martha_pwa_dismissed', 'true'); } catch (e) {}
-    });
     $('close-ios-modal-btn')?.addEventListener('click', () => {
         if ($('ios-install-modal')) $('ios-install-modal').style.display = 'none';
     });
@@ -1814,12 +2158,7 @@ async function openQRConnectModal() {
     if ($('qr-modal')) $('qr-modal').style.display = 'flex';
 }
 
-/* ==========================================================================
-   INITIALIZATION
-   ========================================================================== */
-
 document.addEventListener('DOMContentLoaded', () => {
-    // Cache DOM
     dom = {
         orb: $('martha-orb'),
         statusLabel: $('agent-status-label'),
@@ -1840,17 +2179,21 @@ document.addEventListener('DOMContentLoaded', () => {
     initSpeechRecognition();
     initPwaHooks();
     bindUIEvents();
+    bindLocalModelPromptEvents();
+    initLocalModelUi();
 
     const mode = new URLSearchParams(window.location.search).get('mode');
     if (mode === 'voice') setTimeout(() => triggerActivation(), 600);
     else if (mode === 'search') switchMobileTab('research');
 
     const browserPrompt = isSpeechRecognitionSupported
-        ? "Say “Martha” or tap the orb. Questions that need the web are searched automatically."
-        : "Tap the orb and speak. Questions that need the web are searched automatically.";
+        ? "Say “Martha” or tap the orb. I answer from my own knowledge—say “search for…” when you want web sources."
+        : "Tap the orb and speak. I answer from knowledge—say “search for…” when you want web sources.";
     addSystemMessage(browserPrompt);
 
-    // Heartbeat ping with structured logging
+    setAgentState('sleeping');
+
+    // Tell the Python server we're still here (it may quit when the tab goes away).
     setInterval(() => {
         fetch(getApiUrl('/api/heartbeat'))
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })

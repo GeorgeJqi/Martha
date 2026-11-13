@@ -11,7 +11,7 @@ No app store downloads or developer tools needed! Install directly from your mob
 
 #### On Android (Chrome / Edge / Firefox / Samsung Internet)
 1. Open the Martha URL (e.g. `http://<YOUR_PC_IP>:8000` or your hosted URL) in **Chrome** or **Firefox**.
-2. Tap the **"Install App"** prompt banner at the bottom, or tap the menu in the top-right and select **"Install app"** (or *"Add to Home screen"*).
+2. Tap **Install** in the header when your browser offers it, or open the menu and choose **Install app** / **Add to Home screen**.
 3. Martha will be installed as a standalone app with a full-screen UI, custom icon, and offline caching.
 
 #### On iPhone & iPad (Safari)

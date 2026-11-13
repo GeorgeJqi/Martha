@@ -1,15 +1,13 @@
-/* ==========================================================================
-   MARTHA - SERVICE WORKER (PWA & OFFLINE CACHE)
-   ========================================================================== */
+/* Martha — cache the shell so the app opens quickly offline. */
 
-const CACHE_NAME = 'martha-pwa-v4.1';
+const CACHE_NAME = 'martha-pwa-v4.6';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
     './index.css?v=4.1',
     './base.css',
     './tokens.css',
-    './app.js?v=4.1',
+    './app.js?v=4.6',
     './manifest.json',
     './background.jpg',
     './icons/icon-192.png',
@@ -19,12 +17,10 @@ const ASSETS_TO_CACHE = [
     './icons/icon.svg'
 ];
 
-// Install Event
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
-            // Cache each asset on its own so an optional file, such as the
-            // background photograph, cannot block the whole install.
+            // One failure (e.g. missing background.jpg) shouldn't block the rest.
             return Promise.all(
                 ASSETS_TO_CACHE.map((asset) =>
                     cache.add(asset).catch(() => null)
@@ -34,7 +30,6 @@ self.addEventListener('install', (event) => {
     );
 });
 
-// Activate Event - Clean up stale caches immediately
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then((keyList) => {
@@ -50,11 +45,10 @@ self.addEventListener('activate', (event) => {
     );
 });
 
-// Fetch Event - Network First with Cache Fallback
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // Never cache API routes
+    // Always hit the network for API calls.
     if (url.pathname.startsWith('/api/') || event.request.method !== 'GET') {
         return;
     }

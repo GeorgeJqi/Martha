@@ -1,7 +1,7 @@
 {
   "name": "Martha AI Voice Assistant",
   "short_name": "Martha",
-  "description": "Local, offline-capable AI voice assistant and automated web research agent.",
+  "description": "Martha—composed local voice AI with web research, clear answers, and a warmly professional manner.",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "portrait-primary",

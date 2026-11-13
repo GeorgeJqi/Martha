@@ -9,7 +9,7 @@
   --container: 1440px; --gutter: 40px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
   --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
 
-  /* Ribbon, two-in-the-morning: blue-black night, warm ink, one lit window */
+  /* Night palette: deep blue-black, warm text, amber accent */
   --color-paper: oklch(13.2% 0.022 258); --color-paper-2: oklch(16.4% 0.024 258); --color-paper-3: oklch(20% 0.026 258);
   --color-ink: oklch(93.5% 0.012 85); --color-ink-2: oklch(82% 0.014 85); --color-muted: oklch(72% 0.02 255);
   --color-rule: oklch(27% 0.022 258); --color-rule-2: oklch(36% 0.024 258);

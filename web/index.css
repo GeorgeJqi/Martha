@@ -1,7 +1,4 @@
-/* Hallmark · shape: app screen · genre: atmospheric · theme: Ribbon (deal 3/3, seed minimal-beautiful-dark-voice-1eaa·275d14ba·2026-11-09·r0) · redesign: full
- * nav: kept shell, an edge-aligned bar over the scene · signature: the blurred earthrise behind one lit orb · states: sleeping, listening, thinking, speaking, empty, loading, error, full · ribbon: two-in-the-morning, committed, no glass
- * axes: dark/grotesk-sans/warm · posture: committed · contrast: pass · v2.0.0 */
-/* Hallmark · pre-emit critique: P5 H4 E4 S4 R5 V4 · weakest: E, the first pass still boxed each panel; the open columns and one hairline settle it */
+/* Martha — main layout and screen styles (v2) */
 @import url("./tokens.css");
 @import url("./base.css");
 
@@ -1130,7 +1127,7 @@ input[type="range"]:focus-visible {
 }
 
 /* -------------------------------------------------------------------------
-   Modals, toast, install banner
+   Modals and toast messages
    ------------------------------------------------------------------------- */
 .modal-backdrop {
     position: fixed;
@@ -1303,25 +1300,82 @@ input[type="range"]:focus-visible {
     opacity: 1;
 }
 
-.model-progress {
+.local-model-prompt {
     position: fixed;
-    bottom: calc(var(--space-3xl) + var(--sab));
-    left: 50%;
-    z-index: var(--z-toast);
-    width: 320px;
-    max-width: calc(100% - var(--space-xl));
+    bottom: calc(var(--space-md) + var(--sab));
+    left: calc(var(--space-md) + var(--sal));
+    z-index: var(--z-dropdown);
+    width: min(20rem, calc(100% - var(--space-xl) - var(--sal) - var(--sar)));
     padding: var(--space-md);
     border: var(--rule-hair) solid var(--color-rule-2);
     border-radius: var(--radius-card);
     background: var(--color-paper-2);
-    transform: translateX(-50%);
+    box-shadow: var(--shadow-part);
     animation: message-in var(--dur-short) var(--ease-out) both;
 }
 
-.model-progress-text {
-    margin-bottom: var(--space-xs);
+.local-model-prompt-title {
+    margin: 0 0 var(--space-xs);
+    color: var(--color-ink);
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 500;
+}
+
+.local-model-prompt-copy {
+    margin: 0 0 var(--space-sm);
     color: var(--color-muted);
     font-size: var(--text-xs);
+    line-height: 1.45;
+}
+
+.local-model-prompt-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.local-model-prompt .primary-btn:focus-visible,
+.local-model-prompt .text-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+}
+
+.model-progress {
+    position: fixed;
+    bottom: calc(var(--space-md) + var(--sab));
+    left: calc(var(--space-md) + var(--sal));
+    z-index: var(--z-toast);
+    width: min(20rem, calc(100% - var(--space-xl) - var(--sal) - var(--sar)));
+    padding: var(--space-md);
+    border: var(--rule-hair) solid var(--color-rule-2);
+    border-radius: var(--radius-card);
+    background: var(--color-paper-2);
+    box-shadow: var(--shadow-part);
+    animation: message-in var(--dur-short) var(--ease-out) both;
+}
+
+.model-progress-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xs);
+}
+
+.model-progress-text {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+}
+
+.model-progress-percent {
+    color: var(--color-accent);
+    font-family: var(--font-outlier);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
 }
 
 .model-progress-bar-bg {
@@ -1594,6 +1648,7 @@ input[type="range"]:focus-visible {
         bottom: calc(72px + var(--sab));
     }
 
+    .local-model-prompt,
     .model-progress {
         bottom: calc(96px + var(--sab));
     }

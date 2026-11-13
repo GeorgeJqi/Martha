@@ -18,11 +18,11 @@ DIRECTORY = os.path.join(sys._MEIPASS, "web") if getattr(sys, 'frozen', False) a
 last_heartbeat = time.time() + 30
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    """Multi-threaded HTTP server for non-blocking API endpoints."""
+    """Serve files and API routes without blocking on slow requests."""
     daemon_threads = True
 
 def get_lan_ip():
-    """Detect local network IPv4 address for Wi-Fi mobile pairing."""
+    """Figure out this machine's Wi‑Fi address so phones on the same network can connect."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('8.8.8.8', 80))
@@ -55,7 +55,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_OPTIONS(self):
-        """CORS pre-flight handler for mobile apps and standalone clients."""
+        """Let the browser call the API from another origin when needed (PWA / mobile)."""
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -75,6 +75,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
             ip = get_lan_ip()
             return self.send_json({
                 "name": "Martha Voice AI",
+                "persona": "Martha—composed onboard intelligence; anticipatory, precise, lightly witty",
                 "version": "4.0",
                 "status": "online",
                 "lan_ip": ip,
@@ -113,46 +114,24 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == '/api/local-chat':
             return self.handle_local_chat(data)
 
+        if parsed.path == '/api/chat':
+            return self.handle_remote_chat(data)
+
         self.send_response(404)
         self.end_headers()
 
     def handle_transcribe(self, data):
-        """Cross-browser speech-to-text supporting base64 WAV/PCM and Gemini STT."""
+        """Turn a short WAV clip from the browser into text (fallback when Web Speech isn't available)."""
         try:
             import base64
             audio_b64 = data.get('audio', '')
-            mime = data.get('mime', 'audio/wav')
-            api_key = data.get('api_key', '')
             
             if not audio_b64:
                 return self.send_json({"error": "No audio payload provided", "text": ""}, status=400)
 
-            # 1. Gemini Audio Transcription (High accuracy if API key provided)
-            if api_key:
-                try:
-                    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-                    raw_mime = mime.split(';')[0] if mime else 'audio/wav'
-                    payload = json.dumps({
-                        "contents": [{
-                            "parts": [
-                                {"text": "Transcribe the spoken audio words accurately. Return ONLY the transcribed words with no commentary."},
-                                {"inline_data": {"mime_type": raw_mime, "data": audio_b64}}
-                            ]
-                        }]
-                    }).encode('utf-8')
-                    req = urllib.request.Request(gemini_url, data=payload, headers={'Content-Type': 'application/json'})
-                    with urllib.request.urlopen(req, timeout=12) as res:
-                        res_json = json.loads(res.read().decode('utf-8'))
-                        text = res_json.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
-                        if text:
-                            return self.send_json({"text": text})
-                except Exception as e:
-                    print(f"Gemini transcription error: {e}")
-
-            # 2. Universal 16kHz PCM WAV Google Recognition
             try:
                 raw_bytes = base64.b64decode(audio_b64)
-                # If WAV header exists (RIFF), strip 44-byte header for raw 16-bit 16kHz PCM or send directly
+                # Drop a standard WAV header when present; the recognizer wants raw PCM.
                 pcm_bytes = raw_bytes[44:] if raw_bytes[:4] == b'RIFF' and len(raw_bytes) > 44 else raw_bytes
                 
                 url = "https://www.google.com/speech-api/v2/recognize?output=json&lang=en-US&client=chromium"
@@ -166,7 +145,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
                                 if text:
                                     return self.send_json({"text": text.strip()})
             except Exception as e:
-                print(f"Google speech v2 error: {e}")
+                print(f"[Martha] Speech recognition error: {e}")
 
             return self.send_json({"text": "", "error": "Could not recognize speech. Please speak clearly or enter text."})
         except Exception as e:
@@ -175,15 +154,65 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
     def handle_local_chat(self, data):
         try:
             ollama_url = data.get('url', 'http://localhost:11434').rstrip('/')
+            model = data.get('model', 'llama3.2')
+            system = data.get('system', '')
+            user = data.get('user', data.get('prompt', ''))
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": user})
             payload = json.dumps({
-                "model": data.get('model', 'llama3.2'),
-                "prompt": data.get('prompt', ''),
-                "stream": False
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": 0.72, "num_predict": 420}
             }).encode('utf-8')
-            req = urllib.request.Request(f"{ollama_url}/api/generate", data=payload, headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req, timeout=20) as res:
+            req = urllib.request.Request(
+                f"{ollama_url}/api/chat",
+                data=payload,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=45) as res:
                 res_json = json.loads(res.read().decode('utf-8'))
-                return self.send_json({"response": res_json.get('response', '')})
+                text = (res_json.get('message') or {}).get('content', '').strip()
+                if not text and res_json.get('response'):
+                    text = res_json.get('response', '').strip()
+                return self.send_json({"response": text})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, status=500)
+
+    def handle_remote_chat(self, data):
+        """Forward chat to your chosen API. Key and URL come from the browser; nothing is stored on disk."""
+        try:
+            api_url = data.get('api_url', '').strip()
+            api_key = data.get('api_key', '').strip()
+            model = data.get('model', '').strip()
+            messages = data.get('messages', [])
+            if not api_url or not api_key or not model:
+                return self.send_json({"error": "API URL, key, and model are required"}, status=400)
+            if not messages:
+                return self.send_json({"error": "No messages provided"}, status=400)
+            payload = json.dumps({
+                "model": model,
+                "messages": messages,
+                "max_tokens": 420,
+                "temperature": 0.72
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                api_url,
+                data=payload,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {api_key}'
+                }
+            )
+            with urllib.request.urlopen(req, timeout=35) as res:
+                res_json = json.loads(res.read().decode('utf-8'))
+                text = ''
+                choices = res_json.get('choices') or []
+                if choices:
+                    text = (choices[0].get('message') or {}).get('content', '').strip()
+                return self.send_json({"response": text, "error": res_json.get('error')})
         except Exception as e:
             return self.send_json({"error": str(e)}, status=500)
 
@@ -195,12 +224,12 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
         self.send_json({"status": "success"})
 
     def speak_text(self, text):
-        """Speak in a warm, unhurried voice on the host operating system."""
+        """Read the answer aloud using the best voice this OS offers."""
         clean = re.sub(r'https?://\S+', '', text)
         clean = re.sub(r'["\'\\*_#`]', '', clean).strip()
         if not clean:
             return
-        print(f"Voice TTS ({sys.platform}): '{clean[:60]}...'")
+        print(f"[Martha] Speaking on {sys.platform}.")
 
         if self._speak_with_piper(clean):
             return
@@ -219,8 +248,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
                     pass
                 subprocess.Popen(['say', '-v', voice, '-r', '178', clean])
             elif sys.platform == 'win32':
-                # Prefer a natural installed female voice, then fall back to the
-                # system female hint. Slightly slower and softer than default.
+                # Pick a natural voice when Windows has one; otherwise use the system default.
                 ps_script = (
                     "Add-Type -AssemblyName System.Speech; "
                     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
@@ -237,9 +265,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
                 subprocess.Popen(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             else:
-                # Speech Dispatcher gives the cleanest Linux result. Ask for an
-                # English female voice, then slow it down and take the edge off
-                # the pitch. espeak on its own is a last resort.
+                # Try Speech Dispatcher first on Linux; espeak is the fallback.
                 linux_commands = [
                     ['spd-say', '-l', 'en-US', '-t', 'female2', '-p', '-8', '-r', '-15', '-R', '10', clean],
                     ['spd-say', '-l', 'en-US', '-t', 'female1', '-p', '-8', '-r', '-15', '-R', '10', clean],
@@ -260,7 +286,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
             print(f"TTS execution error: {e}")
 
     def _speak_with_piper(self, text):
-        """Use a local Piper model when one is available, for a neural voice."""
+        """Optional Piper neural voice from ~/.local/share/martha or MARTHA_PIPER_* env vars."""
         piper = (
             os.environ.get('MARTHA_PIPER_BIN')
             or shutil.which('piper')
@@ -326,7 +352,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
             clean = lambda t: re.sub(r'<[^>]+>', '', t).replace('&amp;', '&').replace('&quot;', '"').replace('&#x27;', "'").replace('&lt;', '<').replace('&gt;', '>').strip()
             results = []
 
-            # 1. Primary: DuckDuckGo HTML Scraper
+            # Try DuckDuckGo's HTML results first.
             try:
                 url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
                 req = urllib.request.Request(url, headers={
@@ -350,7 +376,7 @@ class MarthaRequestHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
-            # 2. Fallback: DuckDuckGo Instant Answer API if no HTML results
+            # If that comes up empty, use the instant-answer API.
             if not results:
                 try:
                     ddg_api = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
